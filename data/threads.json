@@ -1,0 +1,17 @@
+{
+  "testuser": {
+    "testuser_078c3f96-81a2-4284-90c6-8dea4d3d5c46": {
+      "id": "testuser_078c3f96-81a2-4284-90c6-8dea4d3d5c46",
+      "title": "id",
+      "createdAt": "2025-04-07 12:58:03",
+      "lastMessagePreview": "",
+      "system_prompt": "你是一个有用的AI助手。"
+    },
+    "testuser_91d192f4-c604-4667-9e05-953097e1e84d": {
+      "id": "testuser_91d192f4-c604-4667-9e05-953097e1e84d",
+      "title": "新对话 2025/4/7 19:40:35",
+      "createdAt": "2025-04-07 19:40:50",
+      "lastMessagePreview": ""
+    }
+  }
+}
