@@ -12,6 +12,20 @@
       "title": "新对话 2025/4/7 19:40:35",
       "createdAt": "2025-04-07 19:40:50",
       "lastMessagePreview": ""
+    },
+    "testuser_5c2c7879-dbf2-4c86-847d-fc559947eac9": {
+      "id": "testuser_5c2c7879-dbf2-4c86-847d-fc559947eac9",
+      "title": "新对话 2025/4/8 16:17:46",
+      "createdAt": "2025-04-08 16:17:49",
+      "lastMessagePreview": ""
+    }
+  },
+  "default_user": {
+    "default_user_4649d3e2-1103-4533-b5d7-a5df261cff74": {
+      "id": "default_user_4649d3e2-1103-4533-b5d7-a5df261cff74",
+      "title": "聊天 2025-04-08 15:45:49",
+      "createdAt": "2025-04-08 15:45:49",
+      "lastMessagePreview": "Hello! 😊 How can I assist you ..."
     }
   }
 }

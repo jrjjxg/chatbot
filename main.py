@@ -19,7 +19,7 @@ from langgraph.graph.message import add_messages
 from thread_manager import (
     save_thread, get_user_threads, remove_thread,
     save_message, get_chat_history, get_thread_messages,
-    threads_store, messages_store
+    thread_manager  # 使用 thread_manager 实例
 )
 
 # 从 .env 文件加载环境变量
