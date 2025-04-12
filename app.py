@@ -60,40 +60,104 @@ def chat_stream_api():
         if request.method == 'POST':
             data = request.json
             user_message = data.get('message', '')
-            user_id = request.args.get('userId')  # 直接获取
-            thread_id = request.args.get('threadId')  # 直接获取
+            request_user_id = request.args.get('userId')  # 请求参数中的 userId
+            thread_id = request.args.get('threadId')
         else:  # GET
             user_message = request.args.get('message', '')
-            user_id = request.args.get('userId')  # 直接获取
-            thread_id = request.args.get('threadId')  # 直接获取
+            request_user_id = request.args.get('userId')  # 请求参数中的 userId
+            thread_id = request.args.get('threadId')
             
-        if not thread_id or not user_id:
-            return jsonify({'error': '缺少必要参数 threadId 或 userId'}), 400
-        
+        if not thread_id:
+             return jsonify({'error': '缺少必要参数 threadId'}), 400
+
+        # 尝试从thread_id中提取user_id
+        thread_user_id = None
+        if '_' in thread_id:
+            thread_user_id = thread_id.split('_')[0]
+
+        # 如果无法从thread_id提取，则使用请求参数中的userId，并打印警告
+        if not thread_user_id:
+            print(f"警告: 无法从 thread_id '{thread_id}' 提取 user_id, 将使用请求参数中的 user_id: {request_user_id}")
+            actual_user_id = request_user_id
+        else:
+            actual_user_id = thread_user_id
+            # 如果提取出的ID和参数ID不一致，打印警告
+            if request_user_id and request_user_id != actual_user_id:
+                 print(f"警告: 请求参数 userId '{request_user_id}' 与 thread_id 中的 userId '{actual_user_id}' 不一致，将优先使用 thread_id 中的用户ID")
+
+        if not actual_user_id:
+            return jsonify({'error': '无法确定有效的用户ID'}), 400
+            
         if not user_message.strip():
             return jsonify({'error': '请输入有效的消息'}), 400
         
-        # 验证并规范化 thread_id 格式
+        # 验证并规范化 thread_id 格式 (如果需要创建新线程，要用actual_user_id)
         if '_' not in thread_id or thread_id.startswith('temp_'):
             print(f"检测到不符合标准的 thread_id: {thread_id}，将创建标准格式的 thread_id")
-            new_thread_id = f"{user_id}_{str(uuid.uuid4())}"
+            new_thread_id = f"{actual_user_id}_{str(uuid.uuid4())}"
             print(f"创建新的 thread_id: {new_thread_id}")
             
             title = f"聊天 {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            save_thread(user_id, new_thread_id, title)
-            thread_id = new_thread_id
+            # 使用 actual_user_id 保存线程
+            save_thread(actual_user_id, new_thread_id, title)
+            thread_id = new_thread_id # 更新 thread_id 为新创建的
         
-        print(f"使用规范化后的 thread_id: {thread_id}")
+        print(f"使用规范化后的 thread_id: {thread_id}，关联的用户ID: {actual_user_id}")
         
-        # 准备消息历史
-        system_prompt = "你是一个有用的AI助手。"
-        messages = get_thread_messages(user_id, thread_id, system_prompt)
+        # 直接从线程存储中获取自定义系统提示词
+        default_system_prompt = "你是一个有用的AI助手。"
+        custom_system_prompt = None
+        
+        # 读取存储的线程数据
+        threads_file = os.path.join("data", "threads.json")
+        if os.path.exists(threads_file):
+            try:
+                with open(threads_file, 'r', encoding='utf-8') as f:
+                    thread_data = json.load(f)
+                    # 使用从thread_id提取或确认后的 actual_user_id 进行查找
+                    if actual_user_id in thread_data and thread_id in thread_data[actual_user_id]:
+                        # 读取自定义system_prompt
+                        custom_system_prompt = thread_data[actual_user_id][thread_id].get('system_prompt')
+                        print(f"找到用户 '{actual_user_id}' 的线程 '{thread_id}' 的自定义系统提示词: {custom_system_prompt}")
+                    else:
+                        print(f"在用户 '{actual_user_id}' 下未找到线程 '{thread_id}' 或其自定义提示词")
+            except Exception as e:
+                print(f"读取线程文件出错: {e}")
+        
+        # 确定使用哪个系统提示词
+        system_prompt = custom_system_prompt if custom_system_prompt else default_system_prompt
+        print(f"最终决定使用的系统提示词: {system_prompt}")
+        
+        # 获取历史消息
+        thread_key = thread_id
+        history_messages = []
+        
+        # 读取消息文件
+        messages_file = os.path.join("data", "messages.json")
+        if os.path.exists(messages_file):
+            try:
+                with open(messages_file, 'r', encoding='utf-8') as f:
+                    messages_data = json.load(f)
+                    if thread_key in messages_data:
+                        history_messages = messages_data[thread_key]
+            except Exception as e:
+                print(f"读取消息历史出错: {e}")
+        
+        # 构建消息列表
+        messages = [SystemMessage(content=system_prompt)]
+        for msg in history_messages:
+            if msg['role'] == 'user':
+                messages.append(HumanMessage(content=msg['content']))
+            elif msg['role'] == 'assistant':
+                messages.append(AIMessage(content=msg['content']))
+        
+        print(f"构建的对话历史长度: {len(messages)}，第一条是系统提示词: {messages[0].content}")
         
         # 配置线程ID
         config = {
             "configurable": {
                 "thread_id": thread_id,
-                "user_id": user_id,
+                "user_id": actual_user_id, # 使用确认后的用户ID
                 "enable_memory": True
             }
         }
@@ -116,8 +180,9 @@ def chat_stream_api():
             
             yield f"event: complete\ndata: {json.dumps({'full_response': full_response, 'response_id': response_id})}\n\n"
             
-            save_message(user_id, thread_id, "user", user_message)
-            save_message(user_id, thread_id, "assistant", full_response)
+            # 使用 actual_user_id 保存消息
+            save_message(actual_user_id, thread_id, "user", user_message)
+            save_message(actual_user_id, thread_id, "assistant", full_response)
         
         return Response(
             generate(),
@@ -137,6 +202,7 @@ def chat_stream_api():
     except Exception as e:
         print(f"处理流式消息时出错: {e}")
         return jsonify({'error': f'处理消息时出错: {str(e)}'}), 500
+
 
 @app.route('/api/thread', methods=['POST'])
 def create_thread():
@@ -250,41 +316,8 @@ def update_prompt():
     except Exception as e:
         return jsonify({'error': f'更新系统提示词时出错: {str(e)}'}), 500
 
-@app.route('/api/test/emotion-monitor', methods=['POST'])
-def test_emotion_monitor():
-    """测试情绪监控功能"""
-    try:
-        data = request.json
-        user_id = data.get('userId')
-        
-        if not user_id:
-            return jsonify({'error': '缺少用户ID'}), 400
-            
-        # 执行测试
-        result = test_emotion_monitor_agent(user_id)
-        
-        return jsonify({'result': result})
-    except Exception as e:
-        return jsonify({'error': f'测试情绪监控时出错: {str(e)}'}), 500
 
-@app.route('/api/emotion-monitor/confirm', methods=['POST'])
-def confirm_emotion_notification():
-    """确认情绪监控通知"""
-    try:
-        data = request.json
-        user_id = data.get('userId')
-        thread_id = data.get('threadId')
-        confirmed = data.get('confirmed', False)
-        
-        if not user_id or not thread_id:
-            return jsonify({'error': '缺少必要参数'}), 400
-            
-        # 这里可以添加确认逻辑
-        # 例如：更新数据库中的通知状态
-        
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        return jsonify({'error': f'确认通知时出错: {str(e)}'}), 500
+
 
 @app.route('/api/chat', methods=['POST'])
 async def chat():
@@ -305,18 +338,7 @@ async def chat():
     except Exception as e:
         return jsonify({'error': f'处理消息时出错: {str(e)}'}), 500
 
-@app.route('/api/confirm', methods=['POST'])
-async def confirm():
-    """处理用户确认"""
-    try:
-        data = request.json
-        confirmed = data.get('confirmed', False)
-        
-        # 这里可以添加确认处理逻辑
-        
-        return jsonify({'status': 'success', 'confirmed': confirmed})
-    except Exception as e:
-        return jsonify({'error': f'处理确认时出错: {str(e)}'}), 500
+
 
 if __name__ == '__main__':
     # 启动情绪监控
