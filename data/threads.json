@@ -1,18 +1,25 @@
 {
   "testuser": {
-    "testuser_078c3f96-81a2-4284-90c6-8dea4d3d5c46": {
-      "id": "testuser_078c3f96-81a2-4284-90c6-8dea4d3d5c46",
-      "title": "id",
-      "createdAt": "2025-04-07 12:58:03",
-      "lastMessagePreview": "",
-      "system_prompt": "你是一个有用的AI助手。"
-    },
     "testuser_d9e2fecf-d863-4024-b910-a6e48c82d135": {
       "id": "testuser_d9e2fecf-d863-4024-b910-a6e48c82d135",
       "title": "新对话 2025/4/12 20:24:42",
       "createdAt": "2025-04-12 20:25:36",
-      "lastMessagePreview": "哎哟喂，现在的小年轻动不动就心情不好（翻白眼）。行吧行吧，看...",
+      "lastMessagePreview": "xg？这ID起的也太随便了吧（嫌弃脸）。不过既然你都这么卑微...",
       "system_prompt": "你是一个十年贴吧黄牌，你喜欢用尖酸刻薄的语气回应用户，即使你想表达喜爱，关心。\n"
+    },
+    "testuser_02bbbaa2-a692-48b5-8c3b-dec4308b02cd": {
+      "id": "testuser_02bbbaa2-a692-48b5-8c3b-dec4308b02cd",
+      "title": "新对话 2025/4/13 20:21:54",
+      "createdAt": "2025-04-13 20:21:55",
+      "lastMessagePreview": "不客气～能帮到你真的很开心！😊  \n\n如果之后遇到其他问题（...",
+      "system_prompt": "你是一个有用的AI助手。"
+    },
+    "testuser_e4201971-c68b-4cc2-ad1c-25c00b1e5082": {
+      "id": "testuser_e4201971-c68b-4cc2-ad1c-25c00b1e5082",
+      "title": "新对话 2025/4/13 20:55:59",
+      "createdAt": "2025-04-13 20:56:01",
+      "lastMessagePreview": "你好！看到你愿意主动打招呼，这已经是很好的自我关怀的第一步了...",
+      "system_prompt": "你是一位富有同理心的心理健康顾问，可以提供情绪支持和一般性心理健康建议。你善于倾听，不做判断，并鼓励用户寻求专业帮助。注意：你不是专业治疗师，不提供诊断或取代专业建议。"
     }
   },
   "default_user": {
@@ -21,6 +28,32 @@
       "title": "聊天 2025-04-08 15:45:49",
       "createdAt": "2025-04-08 15:45:49",
       "lastMessagePreview": "Hello! 😊 How can I assist you ..."
+    },
+    "default_user_4da72ec3-b79b-4686-8361-68757ed78f84": {
+      "id": "default_user_4da72ec3-b79b-4686-8361-68757ed78f84",
+      "title": "聊天 2025-04-13 03:46:56",
+      "createdAt": "2025-04-13 03:46:56",
+      "lastMessagePreview": ""
+    },
+    "default_user_ca62f9c0-8c67-44cc-91f0-e95193cd4df7": {
+      "id": "default_user_ca62f9c0-8c67-44cc-91f0-e95193cd4df7",
+      "title": "聊天 2025-04-13 03:57:35",
+      "createdAt": "2025-04-13 03:57:35",
+      "lastMessagePreview": ""
+    },
+    "default_user_ff814ac8-aece-42e7-b9be-5a5904ddd643": {
+      "id": "default_user_ff814ac8-aece-42e7-b9be-5a5904ddd643",
+      "title": "聊天 2025-04-13 03:59:06",
+      "createdAt": "2025-04-13 03:59:06",
+      "lastMessagePreview": ""
+    }
+  },
+  "anonymousUser": {
+    "anonymousUser_2c6e7814-e33e-4b9c-baca-bae60f1b828e": {
+      "id": "anonymousUser_2c6e7814-e33e-4b9c-baca-bae60f1b828e",
+      "title": "日记讨论: 12",
+      "createdAt": "2025-04-14 10:13:51",
+      "lastMessagePreview": ""
     }
   }
 }

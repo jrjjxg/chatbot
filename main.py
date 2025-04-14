@@ -1,19 +1,28 @@
 import os
-from typing import Annotated, Union, Dict, Any, List
+from typing import Annotated, Union, Dict, Any, List, Optional, Sequence
 import re
 import time
 import json
 import pickle
+import uuid
 from pathlib import Path
+import sqlite3
+import operator
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # 用于 OpenAI 兼容 API
 from typing_extensions import TypedDict
 from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage, AIMessage  # 导入所需消息类型
 from langchain_core.messages.utils import trim_messages  # 导入消息修剪工具
+from langgraph.store.base import BaseStore
+from langchain_core.runnables import RunnableConfig
 
 from langgraph.graph import END, StateGraph, START
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.sqlite import SqliteSaver  # 导入 SqliteSaver
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.postgres import PostgresStore
+from langgraph.prebuilt import ToolNode, tools_condition
 
 # 导入线程和消息管理函数
 from thread_manager import (
@@ -24,7 +33,6 @@ from thread_manager import (
 
 # 从 .env 文件加载环境变量
 load_dotenv()
-
 
 # 定义图的状态结构
 def message_list_manager(existing: list, updates: Union[list, Dict]) -> List:
@@ -59,6 +67,7 @@ def message_list_manager(existing: list, updates: Union[list, Dict]) -> List:
 
 class State(TypedDict):
     messages: Annotated[list, message_list_manager]
+    retrieved_memories: Annotated[list[str], lambda x, y: x + y] = []
 
 
 def get_llm():
@@ -169,267 +178,145 @@ def summarize_messages(messages: List[BaseMessage], llm) -> SystemMessage:
     return SystemMessage(content=f"之前对话的摘要: {summary}")
 
 
-# 简单的文件存储实现，不依赖于OpenAI Embeddings API
-class SimpleMemoryStore:
-    def __init__(self, file_path="memory_store.pkl"):
-        self.file_path = file_path
-        self.memories = {}
-        self.load()
-
-    def load(self):
-        """从文件加载记忆"""
-        try:
-            if os.path.exists(self.file_path):
-                with open(self.file_path, 'rb') as f:
-                    self.memories = pickle.load(f)
-        except Exception as e:
-            print(f"加载记忆文件出错: {e}")
-            self.memories = {}
-
-    def save(self):
-        """保存记忆到文件"""
-        try:
-            with open(self.file_path, 'wb') as f:
-                pickle.dump(self.memories, f)
-        except Exception as e:
-            print(f"保存记忆文件出错: {e}")
-
-    def add_memory(self, user_id, content, metadata=None):
-        """添加新记忆"""
-        metadata = metadata or {}
-        timestamp = time.time()
-
-        if user_id not in self.memories:
-            self.memories[user_id] = []
-
-        self.memories[user_id].append({
-            "content": content,
-            "timestamp": timestamp,
-            "metadata": metadata
-        })
-
-        self.save()
-
-    def search_memories(self, user_id, query, limit=3):
-        """简单搜索记忆 (基于关键词匹配)"""
-        if user_id not in self.memories:
-            return []
-
-        # 将查询分解为关键词
-        keywords = query.lower().split()
-        results = []
-
-        for memory in self.memories[user_id]:
-            content = memory["content"].lower()
-            # 计算匹配的关键词数量
-            match_score = sum(1 for keyword in keywords if keyword in content)
-            if match_score > 0:
-                results.append((memory, match_score))
-
-        # 按相关性排序
-        results.sort(key=lambda x: x[1], reverse=True)
-
-        # 返回最相关的记忆
-        return [item[0]["content"] for item in results[:limit]]
+# 1. 定义图的状态
+class AgentState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], operator.add]
+    memory: Optional[List[str]]
+    user_id: str
 
 
-# 初始化全局记忆存储
-memory_store = SimpleMemoryStore()
+# 2. 辅助函数：提取关键信息
+def extract_important_info(messages: Sequence[BaseMessage]) -> List[str]:
+    """
+    从对话消息中提取需要长期记住的关键信息。
+    返回一个字符串列表，每个字符串是一条要记住的信息。
+    """
+    info_to_remember = []
+    # 只关注最后一条用户消息
+    if messages and isinstance(messages[-1], HumanMessage):
+        last_user_message_content = messages[-1].content.lower()
+        
+        # 提取姓名 (非常基础的示例)
+        name_match = re.search(r"(?:我叫|我(?:的)?名字是)\s?([^\s,，。!！?？]+)", last_user_message_content)
+        if name_match and len(name_match.group(1)) < 10: # 简单长度限制
+             info_to_remember.append(f"用户提到其名字可能是: {name_match.group(1)}")
+
+        # 提取生日 (非常基础的示例)
+        # 匹配 YYYYMMDD, YYYY-MM-DD, YYYY/MM/DD, YYYY年MM月DD日 等
+        birthday_match = re.search(r"生日.*?(\d{4}[-/年.]?\d{1,2}[-/月.]?\d{1,2})", last_user_message_content)
+        if birthday_match:
+            info_to_remember.append(f"用户提到生日日期: {birthday_match.group(1)}")
+            
+        # 你可以添加更多规则，例如提取偏好、地址、重要事件等
+        
+    print(f"[Memory Extraction] 提取到的待记忆信息：{info_to_remember}")
+    return info_to_remember
 
 
-def save_to_long_term_memory(user_id: str, content: str, metadata: Dict = None):
-    """保存重要信息到长期记忆"""
-    global memory_store
-    metadata = metadata or {}
-    memory_store.add_memory(user_id, content, metadata)
-
-
-def retrieve_from_long_term_memory(user_id: str, query: str, k: int = 3):
-    """从长期记忆中检索相关信息"""
-    global memory_store
-    return memory_store.search_memories(user_id, query, limit=k)
-
-
+# 4. 创建图
 def create_graph():
-    """创建并编译 LangGraph 图实例"""
-    # 初始化 StateGraph
-    graph_builder = StateGraph(State)
+    """创建简化的LangGraph图"""
+    builder = StateGraph(AgentState)
 
-    # 获取 LLM 实例
-    llm = get_llm()
+    # 定义一个agent节点，该节点将处理所有消息
+    def agent(state: AgentState):
+        """LLM Agent节点"""
+        llm = get_llm()
+        messages_from_state = state["messages"]
 
-    # 定义聊天机器人节点的核心逻辑
-    def chatbot_node(state: State):
-        """
-        使用当前对话历史调用 LLM。
+        # --- 检查和修复消息类型 ---
+        valid_messages = []
+        print(f"[Agent Node] Raw messages from state: {messages_from_state}") # 调试输出
+        for msg in messages_from_state:
+            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
+                valid_messages.append(msg)
+            elif hasattr(msg, 'type') and hasattr(msg, 'content'):
+                 # 尝试从类似消息的对象恢复 (可能是反序列化不完全的对象)
+                 print(f"[Agent Node] Attempting to reconstruct message: {msg}") # 调试输出
+                 try:
+                     if msg.type == 'human':
+                         valid_messages.append(HumanMessage(content=str(msg.content)))
+                     elif msg.type == 'ai':
+                         valid_messages.append(AIMessage(content=str(msg.content)))
+                     elif msg.type == 'system':
+                          valid_messages.append(SystemMessage(content=str(msg.content)))
+                     else:
+                          print(f"[Agent Node] Skipping message with unknown type attribute: {msg.type}")
+                 except Exception as recon_err:
+                     print(f"[Agent Node] Error reconstructing message: {recon_err}, skipping message: {msg}")
 
-        Args:
-            state: 当前图状态，包含消息列表。
+            elif isinstance(msg, dict) and 'type' in msg and 'content' in msg:
+                 # 尝试从字典恢复
+                 print(f"[Agent Node] Attempting to reconstruct message from dict: {msg}") # 调试输出
+                 try:
+                     msg_type = msg.get("type")
+                     content = msg.get("content", "")
+                     if msg_type == "human":
+                         valid_messages.append(HumanMessage(content=str(content)))
+                     elif msg_type == "ai":
+                          valid_messages.append(AIMessage(content=str(content)))
+                     elif msg_type == "system":
+                          valid_messages.append(SystemMessage(content=str(content)))
+                     else:
+                          print(f"[Agent Node] Skipping dict message with unknown type: {msg_type}")
+                 except Exception as recon_err:
+                     print(f"[Agent Node] Error reconstructing message from dict: {recon_err}, skipping message: {msg}")
+            else:
+                # 记录并跳过无法识别的消息类型
+                print(f"[Agent Node] Warning: Skipping unknown message type {type(msg)} in state: {msg}")
+        
+        print(f"[Agent Node] Validated messages passed to LLM: {valid_messages}") # 调试输出
+        if not valid_messages:
+             # 如果过滤后没有有效消息，可能需要返回错误或默认响应
+             print("[Agent Node] Error: No valid messages found after validation.")
+             return {"messages": [AIMessage(content="Error processing message history.")]}
+        # --- 结束检查和修复 ---
 
-        Returns:
-            包含 LLM 回复的更新后消息列表的字典。
-        """
         try:
-            # 获取配置的最大消息长度（默认4000字符，约相当于1000个token）
-            max_length = int(os.environ.get("MAX_CHARS", "4000"))
+            # 使用验证和修复后的消息列表
+            response = llm.invoke(valid_messages)
+            print(f"[Agent Node] LLM Response: {response}")
+            # 确保返回的是 AIMessage
+            if not isinstance(response, AIMessage):
+                 print(f"[Agent Node] Warning: LLM response is not AIMessage: {type(response)}. Attempting to wrap.")
+                 # 尝试包装，如果失败则返回错误消息
+                 try:
+                     response_content = getattr(response, 'content', str(response))
+                     response = AIMessage(content=str(response_content))
+                 except Exception as wrap_err:
+                     print(f"[Agent Node] Error wrapping LLM response: {wrap_err}")
+                     response = AIMessage(content="Error: Could not process LLM response.")
 
-            # 使用自定义函数修剪消息历史
-            trimmed_messages = smart_trim_messages(
-                state["messages"],
-                max_length=max_length
-            )
+        except Exception as llm_error:
+            print(f"[Agent Node] Error during LLM invocation: {llm_error}")
+            import traceback
+            traceback.print_exc()
+            response = AIMessage(content=f"Sorry, an error occurred while processing your request.")
 
-            # 添加额外的系统指令，确保模型不重复用户的输入
-            # 查找现有的系统消息
-            has_system_message = any(isinstance(msg, SystemMessage) for msg in trimmed_messages)
+        # 更新状态并返回，确保是列表形式
+        return {"messages": [response]}
+    
+    # 添加agent节点
+    builder.add_node("agent", agent)
+    
+    # 定义简化的图流程 - 删除记忆相关节点
+    builder.add_edge(START, "agent")  # 直接开始agent节点
+    builder.add_edge("agent", END)    # agent执行完直接结束
 
-            # 如果没有系统消息，添加一个
-            if not has_system_message:
-                system_content = get_default_system_message().content
-                system_content += " 请直接回答用户问题，不要在回复中重复用户的输入。"
-                trimmed_messages.insert(0, SystemMessage(content=system_content))
-
-            # 记录修剪前后的消息数量
-            print(f"消息历史: 修剪前 {len(state['messages'])} 条，修剪后 {len(trimmed_messages)} 条")
-
-            # 使用修剪后的消息调用 LLM
-            return {"messages": [llm.invoke(trimmed_messages)]}
-        except Exception as e:
-            # 捕获并打印错误
-            print(f"调用 LLM 时出错: {e}")
-            # 返回错误消息
-            return {"messages": [(
-                "assistant",
-                f"很抱歉，处理您的请求时出现了错误: {e}"
-            )]}
-
-    # 定义记忆检索节点
-    def memory_retrieval_node(state: State, config: Dict = None):
-        """检索长期记忆并添加到当前上下文"""
-        if not config:
-            config = {}
-
-        # 检查是否启用长期记忆
-        enable_memory = config.get("configurable", {}).get("enable_memory", True)
-        if not enable_memory:
-            print("长期记忆已禁用，跳过记忆检索")
-            return {}
-
-        # 从config中获取user_id
-        user_id = config.get("configurable", {}).get("user_id", "default_user")
-
-        # 获取当前用户问题
-        messages = state["messages"]
-        last_user_msg = None
-        for msg in reversed(messages):
-            if getattr(msg, "type", "") == "human" or (isinstance(msg, tuple) and msg[0] == "user"):
-                if isinstance(msg, tuple):
-                    last_user_msg = msg[1]
-                else:
-                    last_user_msg = msg.content
-                break
-
-        if not last_user_msg:
-            return {}  # 没有用户消息，不做任何改变
-
-        # 检索相关记忆
-        memories = retrieve_from_long_term_memory(user_id, last_user_msg)
-
-        if not memories:
-            return {}  # 没有找到相关记忆
-
-        # 添加记忆作为系统消息
-        memories_text = "\n".join([f"- {mem}" for mem in memories])
-        memory_message = SystemMessage(content=f"以下是与当前问题相关的历史信息:\n{memories_text}")
-
-        return {"messages": [memory_message]}
-
-    # 定义记忆写入节点
-    def memory_writer_node(state: State, config: Dict = None):
-        """将重要信息写入长期记忆"""
-        if not config:
-            config = {}
-
-        # 检查是否启用长期记忆
-        enable_memory = config.get("configurable", {}).get("enable_memory", True)
-        if not enable_memory:
-            print("长期记忆已禁用，跳过记忆写入")
-            return {}
-
-        user_id = config.get("configurable", {}).get("user_id", "default_user")
-        messages = state["messages"]
-
-        # 分析最近的对话，判断是否包含重要信息
-        recent_messages = messages[-4:] if len(messages) >= 4 else messages
-
-        # 提取用户问题和AI回答
-        user_question = None
-        ai_answer = None
-
-        for msg in recent_messages:
-            if getattr(msg, "type", "") == "human" or (isinstance(msg, tuple) and msg[0] == "user"):
-                if isinstance(msg, tuple):
-                    user_question = msg[1]
-                else:
-                    user_question = msg.content
-            elif getattr(msg, "type", "") == "ai" or (isinstance(msg, tuple) and msg[0] == "assistant"):
-                if isinstance(msg, tuple):
-                    ai_answer = msg[1]
-                else:
-                    ai_answer = msg.content
-
-        if user_question and ai_answer:
-            # 使用启发式规则判断是否是重要信息
-            # 这里可以实现更复杂的逻辑或使用LLM判断
-            important_keywords = ["记住", "保存", "记录", "重要", "不要忘记"]
-            if any(keyword in user_question.lower() for keyword in important_keywords):
-                # 保存到长期记忆
-                memory_content = f"问题: {user_question}\n回答: {ai_answer}"
-                save_to_long_term_memory(user_id, memory_content)
-
-        # 不修改状态，只写入记忆
-        return {}
-
-    # 添加 chatbot 节点到图中
-    graph_builder.add_node("chatbot", chatbot_node)
-
-    # 添加记忆检索节点
-    graph_builder.add_node("memory_retrieval", memory_retrieval_node)
-
-    # 添加记忆写入节点
-    graph_builder.add_node("memory_writer", memory_writer_node)
-
-    # 定义图的流程
-    graph_builder.add_edge(START, "memory_retrieval")
-    graph_builder.add_edge("memory_retrieval", "chatbot")
-    graph_builder.add_edge("chatbot", "memory_writer")
-    graph_builder.add_edge("memory_writer", END)
-
-    # 编译图，使其可执行
-    return graph_builder.compile()
-
+    # 编译图 (Checkpointer在app.py中编译时传入)
+    # 这里只返回builder，编译在app.py中进行
+    print("Graph definition complete.")
+    return builder
 
 # 获取默认系统提示
 def get_default_system_message() -> SystemMessage:
     """返回默认的系统消息"""
-    content = os.environ.get("DEFAULT_SYSTEM_PROMPT", "你是一个乐于助人的AI助手。")
+    content = os.environ.get("DEFAULT_SYSTEM_PROMPT", "你是一个乐于助人的AI助手。请利用提供的背景记忆（如果有的话）来更好地与用户交流。")
     return SystemMessage(content=content)
 
 
-# 处理聊天更新的辅助函数（用于命令行和 Web 界面）
 def process_graph_stream(graph, user_input: str, history=None, config=None):
-    """
-    处理用户输入并返回流式 AI 响应生成器
-
-    Args:
-        graph: 已编译的 LangGraph 图实例
-        user_input: 用户输入的文本
-        history: 可选的历史消息列表（如果为 None，只包含用户当前输入）
-        config: 可选的配置信息（如 thread_id）
-
-    Returns:
-        生成器，产生 AI 响应的片段
-    """
+    """处理用户输入并返回生成的响应流"""
     # 准备消息输入
     messages_input = []
 
@@ -442,64 +329,68 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
         messages_input.append(user_input)
     else:
         # 假设这是一个字符串文本
-        messages_input.append(("user", user_input))
+        messages_input.append(HumanMessage(content=user_input))
 
     # 如果没有提供配置，创建一个默认配置
     if config is None:
         config = {"configurable": {"thread_id": "chat_session_1"}}
+    
+    # 记录当前请求的线程ID和会话状态
+    thread_id = config.get("configurable", {}).get("thread_id", "unknown")
+    print(f"[LANGGRAPH] 正在处理 thread_id={thread_id} 的请求，消息历史长度: {len(messages_input)}")
+    print(f"[LANGGRAPH] 当前请求的配置: {config}")
 
-    # 使用 messages 模式流式传输 LLM 生成的内容
+    # 使用 "messages" 模式流式传输 LLM 生成的内容
     try:
+        # 使用 RunnableConfig 确保配置正确传递
+        langgraph_config = RunnableConfig(configurable=config.get("configurable", {}))
+        
         # 使用 "messages" 模式，专门用于流式传输 LLM 令牌
         for event in graph.stream(
                 {"messages": messages_input},
-                config=config,
+                config=langgraph_config,
                 stream_mode="messages"  # 使用 messages 模式
         ):
+            # 更详细的调试信息
+            print(f"[LANGGRAPH STREAM] 收到事件: {type(event)}")
+            
             # event 会包含 LLM 生成的令牌和元数据
             if isinstance(event, tuple) and len(event) >= 1:
                 token = event[0]
+                # 尝试提取内容部分
                 if hasattr(token, 'content') and token.content:
+                    print(f"[LANGGRAPH STREAM] 发送token: '{token.content}'")
                     yield token.content
+                elif isinstance(token, str):
+                    print(f"[LANGGRAPH STREAM] 发送字符串token: '{token}'")
+                    yield token
+            # 直接处理消息对象
             elif hasattr(event, 'content') and event.content:
+                print(f"[LANGGRAPH STREAM] 发送内容: '{event.content}'")
                 yield event.content
+            elif isinstance(event, str):
+                print(f"[LANGGRAPH STREAM] 发送字符串: '{event}'")
+                yield event
+        
+        print(f"[LANGGRAPH] thread_id={thread_id} 的请求处理完成")
     except Exception as e:
-        yield f"流式传输过程中发生错误: {e}"
+        print(f"[LANGGRAPH] thread_id={thread_id} 处理过程中出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        yield f"流式传输过程中发生错误: {str(e)}"
 
 
 # 交互式命令行界面（保留原有功能）
 def start_cli():
-    """启动命令行交互界面"""
-    # 创建 LangGraph 图
-    graph = create_graph()
+    """启动命令行界面"""
+    graph_builder = create_graph()
+    
+    # 在应用启动时初始化 checkpointer，而不是在每次请求中
+    sqlite_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
+    checkpointer = SqliteSaver(sqlite_conn)  # 直接使用连接创建 SqliteSaver
 
-    print("聊天机器人已初始化。输入 'quit', 'exit', 或 'q' 结束。")
-    # 为流配置基础信息
-    config = {"configurable": {"thread_id": "chat_session_1"}}
-
-    while True:
-        try:
-            user_input = input("用户: ")
-            if user_input.lower() in ["quit", "exit", "q"]:
-                print("再见!")
-                break
-            if user_input.strip():  # 确保输入不为空
-                # 使用流式处理函数并直接打印结果
-                for response_chunk in process_graph_stream(graph, user_input, config=config):
-                    print("助手:", response_chunk, end="", flush=True)
-                print()  # 换行
-            else:
-                print("请输入消息。")
-        except EOFError:  # 处理 Ctrl+D
-            print("\n再见!")
-            break
-        except KeyboardInterrupt:  # 处理 Ctrl+C
-            print("\n收到中断请求，正在退出...")
-            break
-        except Exception as e:  # 捕获其他错误
-            print(f"发生意外错误: {e}")
-            break
-
+    # 编译图，并添加持久化
+    runnable = graph_builder.compile(checkpointer=checkpointer)
 
 # 如果直接运行此脚本，启动命令行界面
 if __name__ == "__main__":
