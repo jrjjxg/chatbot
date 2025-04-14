@@ -181,3 +181,73 @@ def get_chat_history(user_id: str, thread_id: str) -> List[Dict[str, str]]:
 
 def get_thread_messages(user_id: str, thread_id: str, system_prompt: str) -> List:
     return thread_manager.get_thread_messages(user_id, thread_id, system_prompt)
+
+
+def get_chat_history_from_db(user_id, thread_id):
+    """
+    从PostgreSQL数据库获取聊天历史记录
+    
+    参数:
+        user_id (str): 用户ID
+        thread_id (str): 会话线程ID
+        
+    返回:
+        list: 消息列表
+    """
+    try:
+        messages = []
+        
+        # 获取数据库连接
+        with pool.connection() as conn:
+            # 创建游标
+            with conn.cursor() as cur:
+                # 准备SQL语句
+                sql = """
+                SELECT id, role, content, msg_type, metadata, timestamp 
+                FROM messages 
+                WHERE thread_id = %s AND user_id = %s
+                ORDER BY timestamp ASC
+                """
+                
+                # 执行SQL
+                cur.execute(sql, (thread_id, user_id))
+                
+                # 获取所有结果
+                for row in cur.fetchall():
+                    db_id, role, content, msg_type, metadata_json, timestamp = row
+                    
+                    # 构造消息对象
+                    message = {
+                        "id": f"msg-{db_id}",
+                        "role": role,
+                        "content": content,
+                        "timestamp": timestamp.isoformat() if timestamp else None
+                    }
+                    
+                    # 处理特殊类型消息
+                    if msg_type and msg_type != 'text':
+                        message["type"] = msg_type
+                        
+                        # 如果有元数据，添加到消息
+                        if metadata_json:
+                            try:
+                                metadata = json.loads(metadata_json)
+                                # 将元数据字段添加到消息
+                                for key, value in metadata.items():
+                                    if key not in message:  # 避免覆盖基本字段
+                                        message[key] = value
+                            except json.JSONDecodeError:
+                                print(f"解析元数据JSON失败: {metadata_json}")
+                    
+                    messages.append(message)
+                
+                print(f"从数据库获取了 {len(messages)} 条消息记录")
+                return {"data": messages}
+                
+    except Exception as e:
+        print(f"从数据库获取聊天历史失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # 返回空消息列表
+        return {"data": [], "error": str(e)}

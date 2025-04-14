@@ -10,6 +10,8 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.store.postgres import PostgresStore
 from psycopg_pool import ConnectionPool
+import requests
+import datetime
 
 # 导入需要的函数，避免循环导入
 from main import (
@@ -29,6 +31,145 @@ from thread_manager import (
     get_chat_history,
     get_thread_messages
 )
+
+# 添加一个获取日记详情的函数
+def get_journal_detail(journal_id, user_id=None):
+    """获取日记详情 (使用正确的 /get/{id} 路径)"""
+    try:
+        # 配置Java后端API基础URL
+        SPRING_BOOT_BASE_URL = os.getenv("SPRING_BOOT_BASE_URL", "http://localhost:9000")
+        
+        # --- 修改点: 构建正确的API URL，使用路径参数 ---
+        # 注意: Java端 /get/{id} 接口似乎不直接接收 userId 作为路径或查询参数
+        # 它通过 UserUtil.getCurrentUserId() 获取用户ID，这通常依赖于请求头中的认证信息（如JWT）
+        api_url = f"{SPRING_BOOT_BASE_URL}/api/journal/get/{journal_id}" 
+        
+        print(f"获取日记详情 (修正后的URL): {api_url}")
+        
+        # --- 修改点: 移除不必要的 params={'userId': user_id}，因为接口路径已包含ID ---
+        # 但仍可能需要传递认证信息，例如通过headers
+        headers = {} 
+        # 如果需要认证，可能需要类似:
+        # if user_id: 
+        #    # 假设需要某种形式的Token或Session ID传递用户身份
+        #    # headers['Authorization'] = f'Bearer {get_user_token(user_id)}' 
+        #    # 或者 headers['Cookie'] = f'JSESSIONID={get_user_session(user_id)}'
+        #    pass 
+
+        response = requests.get(api_url, headers=headers, timeout=10) 
+        
+        if response.status_code == 200:
+            data = response.json()
+            # 检查Java后端返回的Result对象的结构
+            if data.get("code") == 200 and data.get("data"):
+                return data.get("data")
+            else:
+                print(f"获取日记详情失败 (业务错误): code={data.get('code')}, message={data.get('message')}")
+                return None
+        else:
+            print(f"获取日记详情失败 (HTTP错误): {response.status_code} {response.text}")
+            return None
+    except Exception as e:
+        print(f"获取日记详情异常: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+# 创建日记提示的辅助函数
+def create_diary_prompt(journal):
+    """根据日记内容创建提示词"""
+    title = journal.get("title", "无标题")
+    content = journal.get("content", "")
+    create_time = journal.get("createTime", "")
+    word_count = journal.get("wordCount", 0)
+    is_private = journal.get("isPrivate", 0)
+    
+    # 格式化日期
+    date_str = ""
+    if create_time:
+        try:
+            # 尝试解析ISO格式的日期
+            if isinstance(create_time, str):
+                # 移除可能的Z后缀并添加时区
+                date = datetime.datetime.fromisoformat(create_time.replace('Z', '+00:00'))
+                date_str = date.strftime("%Y年%m月%d日 %H:%M")
+            else:
+                date_str = create_time
+        except Exception as e:
+            print(f"格式化日期失败: {e}")
+            date_str = str(create_time)
+    
+    # 构建提示词
+    prompt = f"我想讨论我的这篇日记：\n\n标题：{title}\n"
+    prompt += f"日期：{date_str}\n"
+    
+    if word_count:
+        prompt += f"字数：{word_count}字\n"
+    
+    if is_private == 1:
+        prompt += f"私密状态：是\n"
+    
+    # 添加日记内容
+    prompt += f"\n日记内容：\n{content}\n\n"
+    
+    # 添加请求
+    prompt += "请帮我分析这篇日记，给我一些建议或者反馈。"
+    
+    return prompt
+
+# 修改 thread_manager.py 中的 save_message 函数（如果不能直接修改，这里提供一个增强版本）
+def save_message_enhanced(user_id, thread_id, role, content, msg_type='text', metadata=None):
+    """保存消息到会话历史，支持特殊类型的消息"""
+    try:
+        messages_file = os.path.join("data", "messages.json")
+        
+        try:
+            if os.path.exists(messages_file):
+                with open(messages_file, 'r', encoding='utf-8') as f:
+                    messages_data = json.load(f)
+            else:
+                messages_data = {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            messages_data = {}
+        
+        # 创建消息对象
+        timestamp = datetime.datetime.now().isoformat()
+        message_id = f"{role}-{int(time.time()*1000)}"
+        
+        # 基本消息结构
+        message = {
+            "id": message_id,
+            "role": role,
+            "content": content,
+            "timestamp": timestamp
+        }
+        
+        # 处理特殊类型消息
+        if msg_type != 'text':
+            message["type"] = msg_type
+            
+            # 如果是日记分享卡片，添加额外字段
+            if msg_type == 'diary_share' and metadata:
+                for key, value in metadata.items():
+                    if key not in message:  # 避免覆盖基本字段
+                        message[key] = value
+        
+        # 确保线程ID存在
+        if thread_id not in messages_data:
+            messages_data[thread_id] = []
+        
+        # 添加消息
+        messages_data[thread_id].append(message)
+        
+        # 写入文件
+        with open(messages_file, 'w', encoding='utf-8') as f:
+            json.dump(messages_data, f, ensure_ascii=False, indent=2)
+            
+        print(f"消息已保存 - 线程: {thread_id}, 角色: {role}, 类型: {msg_type}")
+        return True
+    except Exception as e:
+        print(f"保存消息失败: {str(e)}")
+        return False
 
 # 初始化 Flask 应用
 app = Flask(__name__)
@@ -218,6 +359,31 @@ def chat_stream_api():
 
         print(f"构建的对话历史长度: {len(messages)}，第一条是系统提示词: {messages[0].content}")
 
+        # 检查是否为日记分享触发消息
+        is_share_trigger = user_message.startswith('//share_diary:')
+        shared_diary_id = None
+        diary_details = None
+        input_for_llm = user_message  # 默认使用原始消息
+        
+        if is_share_trigger:
+            try:
+                # 提取日记ID
+                shared_diary_id = user_message.split(':', 1)[1].strip()
+                print(f"检测到日记分享触发: {shared_diary_id}")
+                
+                # 获取日记详情
+                diary_details = get_journal_detail(shared_diary_id, actual_user_id)
+                if diary_details:
+                    print(f"成功获取日记详情: {diary_details.get('title', '无标题')}")
+                    # 创建日记提示词
+                    input_for_llm = create_diary_prompt(diary_details)
+                else:
+                    print("获取日记详情失败")
+                    input_for_llm = f"我想分享我的日记(ID:{shared_diary_id})，但获取详情失败了，请给我提供一些通用的日记写作建议。"
+            except Exception as e:
+                print(f"处理日记分享触发失败: {e}")
+                input_for_llm = f"我想分享我的日记，但处理过程出错: {str(e)}"
+
         # 配置线程ID
         config = {
             "configurable": {
@@ -233,10 +399,34 @@ def chat_stream_api():
             """SSE 事件生成器"""
             full_response = ""
             yield f"event: start\ndata: {json.dumps({'response_id': response_id})}\n\n"
+            
+            # 如果是日记分享，先保存卡片消息
+            if is_share_trigger and diary_details:
+                try:
+                    # 创建卡片消息
+                    card_id = f"diary-{shared_diary_id}-{int(time.time())}"
+                    card_metadata = {
+                        "diaryId": shared_diary_id,
+                        "diaryTitle": diary_details.get("title", "无标题日记"),
+                        "diaryDate": diary_details.get("createTime")
+                    }
+                    
+                    # 保存卡片消息
+                    save_message_enhanced(
+                        actual_user_id,
+                        thread_id,
+                        "system",  # 用system角色
+                        f"分享了日记: {card_metadata['diaryTitle']}",  # 显示内容
+                        msg_type='diary_share',  # 特殊类型
+                        metadata=card_metadata  # 额外数据
+                    )
+                    print(f"已保存日记分享卡片: {card_id}")
+                except Exception as e:
+                    print(f"保存日记分享卡片失败: {e}")
 
             for chunk in process_graph_stream(
                     app.runnable,
-                    user_message,
+                    input_for_llm,  # 使用可能经过处理的消息
                     history=messages,
                     config=config
             ):
@@ -245,8 +435,17 @@ def chat_stream_api():
 
             yield f"event: complete\ndata: {json.dumps({'full_response': full_response, 'response_id': response_id})}\n\n"
 
-            # 使用 actual_user_id 保存消息
-            save_message(actual_user_id, thread_id, "user", user_message)
+            # 保存消息到历史记录
+            # 对于分享触发消息，保存触发消息本身（可选）
+            if not is_share_trigger:
+                # 只保存非触发的普通用户消息
+                save_message(actual_user_id, thread_id, "user", user_message)
+            else:
+                # 触发消息可以选择保存或不保存
+                # 这里选择保存，方便调试，如果不需要可以去掉
+                save_message(actual_user_id, thread_id, "user", user_message)
+            
+            # 保存AI回复
             save_message(actual_user_id, thread_id, "assistant", full_response)
 
         return Response(
@@ -480,10 +679,6 @@ if __name__ == '__main__':
             print("正在关闭PostgreSQL连接池...")
             pool.close()
             print("PostgreSQL连接池已关闭。")
-        # 移除或修改SQLite清理逻辑
-        # if hasattr(app, 'sqlite_conn'):
-        #     print("应用退出，关闭 SQLite 数据库连接")
-        #     app.sqlite_conn.close()
 
     # 启动 Flask 应用
     print("正在启动Flask应用...")
@@ -502,10 +697,6 @@ if __name__ == '__main__':
             print("正在关闭PostgreSQL连接池...")
             pool.close()
             print("PostgreSQL连接池已关闭。")
-        # 移除或修改SQLite清理逻辑
-        # if hasattr(app, 'sqlite_conn'):
-        #     print("应用退出，关闭 SQLite 数据库连接")
-        #     app.sqlite_conn.close()
 
     # 启动 Flask 应用
     print("正在启动Flask应用...")

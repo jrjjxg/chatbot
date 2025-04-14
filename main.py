@@ -195,7 +195,7 @@ def extract_important_info(messages: Sequence[BaseMessage]) -> List[str]:
     # 只关注最后一条用户消息
     if messages and isinstance(messages[-1], HumanMessage):
         last_user_message_content = messages[-1].content.lower()
-        
+
         # 提取姓名 (非常基础的示例)
         name_match = re.search(r"(?:我叫|我(?:的)?名字是)\s?([^\s,，。!！?？]+)", last_user_message_content)
         if name_match and len(name_match.group(1)) < 10: # 简单长度限制
@@ -206,9 +206,9 @@ def extract_important_info(messages: Sequence[BaseMessage]) -> List[str]:
         birthday_match = re.search(r"生日.*?(\d{4}[-/年.]?\d{1,2}[-/月.]?\d{1,2})", last_user_message_content)
         if birthday_match:
             info_to_remember.append(f"用户提到生日日期: {birthday_match.group(1)}")
-            
+
         # 你可以添加更多规则，例如提取偏好、地址、重要事件等
-        
+
     print(f"[Memory Extraction] 提取到的待记忆信息：{info_to_remember}")
     return info_to_remember
 
@@ -264,7 +264,7 @@ def create_graph():
             else:
                 # 记录并跳过无法识别的消息类型
                 print(f"[Agent Node] Warning: Skipping unknown message type {type(msg)} in state: {msg}")
-        
+
         print(f"[Agent Node] Validated messages passed to LLM: {valid_messages}") # 调试输出
         if not valid_messages:
              # 如果过滤后没有有效消息，可能需要返回错误或默认响应
@@ -295,10 +295,10 @@ def create_graph():
 
         # 更新状态并返回，确保是列表形式
         return {"messages": [response]}
-    
+
     # 添加agent节点
     builder.add_node("agent", agent)
-    
+
     # 定义简化的图流程 - 删除记忆相关节点
     builder.add_edge(START, "agent")  # 直接开始agent节点
     builder.add_edge("agent", END)    # agent执行完直接结束
@@ -334,7 +334,7 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
     # 如果没有提供配置，创建一个默认配置
     if config is None:
         config = {"configurable": {"thread_id": "chat_session_1"}}
-    
+
     # 记录当前请求的线程ID和会话状态
     thread_id = config.get("configurable", {}).get("thread_id", "unknown")
     print(f"[LANGGRAPH] 正在处理 thread_id={thread_id} 的请求，消息历史长度: {len(messages_input)}")
@@ -344,7 +344,7 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
     try:
         # 使用 RunnableConfig 确保配置正确传递
         langgraph_config = RunnableConfig(configurable=config.get("configurable", {}))
-        
+
         # 使用 "messages" 模式，专门用于流式传输 LLM 令牌
         for event in graph.stream(
                 {"messages": messages_input},
@@ -353,7 +353,7 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
         ):
             # 更详细的调试信息
             print(f"[LANGGRAPH STREAM] 收到事件: {type(event)}")
-            
+
             # event 会包含 LLM 生成的令牌和元数据
             if isinstance(event, tuple) and len(event) >= 1:
                 token = event[0]
@@ -371,7 +371,7 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
             elif isinstance(event, str):
                 print(f"[LANGGRAPH STREAM] 发送字符串: '{event}'")
                 yield event
-        
+
         print(f"[LANGGRAPH] thread_id={thread_id} 的请求处理完成")
     except Exception as e:
         print(f"[LANGGRAPH] thread_id={thread_id} 处理过程中出错: {str(e)}")
@@ -384,13 +384,6 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
 def start_cli():
     """启动命令行界面"""
     graph_builder = create_graph()
-    
-    # 在应用启动时初始化 checkpointer，而不是在每次请求中
-    sqlite_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
-    checkpointer = SqliteSaver(sqlite_conn)  # 直接使用连接创建 SqliteSaver
-
-    # 编译图，并添加持久化
-    runnable = graph_builder.compile(checkpointer=checkpointer)
 
 # 如果直接运行此脚本，启动命令行界面
 if __name__ == "__main__":
