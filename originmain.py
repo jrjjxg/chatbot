@@ -12,7 +12,7 @@ import operator
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # 用于 OpenAI 兼容 API
 from typing_extensions import TypedDict
-from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage, AIMessage, ToolMessage  # 导入所需消息类型
+from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage, AIMessage  # 导入所需消息类型
 from langchain_core.messages.utils import trim_messages  # 导入消息修剪工具
 from langgraph.store.base import BaseStore
 from langchain_core.runnables import RunnableConfig
@@ -23,7 +23,6 @@ from langgraph.checkpoint.sqlite import SqliteSaver  # 导入 SqliteSaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.store.postgres import PostgresStore
 from langgraph.prebuilt import ToolNode, tools_condition
-from tools import dd_search, send_email
 
 # 导入线程和消息管理函数
 from thread_manager import (
@@ -216,28 +215,24 @@ def extract_important_info(messages: Sequence[BaseMessage]) -> List[str]:
 
 # 4. 创建图
 def create_graph():
-    """创建带有工具调用能力的 LangGraph 图"""
-    llm = get_llm() # 获取 LLM 实例
-    # 绑定工具到 LLM，这样 LLM 的输出会包含 tool_calls
-    # 注意：这里暂时只绑定了 dd_search 和 send_email
-    # 如果需要记忆工具，需要在创建图时传入 store 实例并创建加入
-    llm_with_tools = llm.bind_tools([dd_search, send_email])
+    """创建简化的LangGraph图"""
+    builder = StateGraph(AgentState)
 
-    # 定义 Agent 节点
+    # 定义一个agent节点，该节点将处理所有消息
     def agent(state: AgentState):
-        """LLM Agent 节点，决定是回复还是调用工具"""
+        """LLM Agent节点"""
+        llm = get_llm()
         messages_from_state = state["messages"]
-        
-        # --- 复用之前的消息验证和修复逻辑 --- 
+
+        # --- 检查和修复消息类型 ---
         valid_messages = []
-        print(f"[Agent Node] Raw messages from state: {messages_from_state}") 
+        print(f"[Agent Node] Raw messages from state: {messages_from_state}") # 调试输出
         for msg in messages_from_state:
-            # 显式检查 LangChain 核心消息类型
-            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
+            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
                 valid_messages.append(msg)
-            # 保留之前的重建逻辑作为后备
             elif hasattr(msg, 'type') and hasattr(msg, 'content'):
-                 print(f"[Agent Node] Attempting to reconstruct message: {msg}") 
+                 # 尝试从类似消息的对象恢复 (可能是反序列化不完全的对象)
+                 print(f"[Agent Node] Attempting to reconstruct message: {msg}") # 调试输出
                  try:
                      if msg.type == 'human':
                          valid_messages.append(HumanMessage(content=str(msg.content)))
@@ -249,8 +244,10 @@ def create_graph():
                           print(f"[Agent Node] Skipping message with unknown type attribute: {msg.type}")
                  except Exception as recon_err:
                      print(f"[Agent Node] Error reconstructing message: {recon_err}, skipping message: {msg}")
+
             elif isinstance(msg, dict) and 'type' in msg and 'content' in msg:
-                 print(f"[Agent Node] Attempting to reconstruct message from dict: {msg}")
+                 # 尝试从字典恢复
+                 print(f"[Agent Node] Attempting to reconstruct message from dict: {msg}") # 调试输出
                  try:
                      msg_type = msg.get("type")
                      content = msg.get("content", "")
@@ -265,77 +262,61 @@ def create_graph():
                  except Exception as recon_err:
                      print(f"[Agent Node] Error reconstructing message from dict: {recon_err}, skipping message: {msg}")
             else:
+                # 记录并跳过无法识别的消息类型
                 print(f"[Agent Node] Warning: Skipping unknown message type {type(msg)} in state: {msg}")
-        # --- 结束消息验证和修复 --- 
 
-        print(f"[Agent Node] Validated messages passed to LLM: {valid_messages}") 
+        print(f"[Agent Node] Validated messages passed to LLM: {valid_messages}") # 调试输出
         if not valid_messages:
+             # 如果过滤后没有有效消息，可能需要返回错误或默认响应
              print("[Agent Node] Error: No valid messages found after validation.")
              return {"messages": [AIMessage(content="Error processing message history.")]}
+        # --- 结束检查和修复 ---
 
-        # 验证和构建消息后，添加修剪
-        valid_messages = smart_trim_messages(valid_messages, max_length=4000)  
-        # 或者使用摘要功能
-        if len(valid_messages) > 10:  # 如果消息过多
-            summary = summarize_messages(valid_messages[:-4], llm)  # 对旧消息生成摘要
-            valid_messages = [summary] + valid_messages[-4:]  # 只保留摘要和最近消息
-
-        print(f"[Agent Node] Calling LLM with tools. Messages: {valid_messages}")
         try:
-            # 调用绑定了工具的 LLM
-            response = llm_with_tools.invoke(valid_messages)
+            # 使用验证和修复后的消息列表
+            response = llm.invoke(valid_messages)
             print(f"[Agent Node] LLM Response: {response}")
-            # Agent 节点直接返回 LLM 的响应 (可能包含工具调用)
-            return {"messages": [response]}
+            # 确保返回的是 AIMessage
+            if not isinstance(response, AIMessage):
+                 print(f"[Agent Node] Warning: LLM response is not AIMessage: {type(response)}. Attempting to wrap.")
+                 # 尝试包装，如果失败则返回错误消息
+                 try:
+                     response_content = getattr(response, 'content', str(response))
+                     response = AIMessage(content=str(response_content))
+                 except Exception as wrap_err:
+                     print(f"[Agent Node] Error wrapping LLM response: {wrap_err}")
+                     response = AIMessage(content="Error: Could not process LLM response.")
+
         except Exception as llm_error:
             print(f"[Agent Node] Error during LLM invocation: {llm_error}")
             import traceback
             traceback.print_exc()
             response = AIMessage(content=f"Sorry, an error occurred while processing your request.")
-            return {"messages": [response]}
 
-    # 定义图构建器
-    builder = StateGraph(AgentState)
+        # 更新状态并返回，确保是列表形式
+        return {"messages": [response]}
 
-    # 添加 Agent 节点
+    # 添加agent节点
     builder.add_node("agent", agent)
 
-    # 添加 ToolNode
-    # 注意：工具列表现在包含 dd_search 和 send_email
-    # 如果需要记忆工具，需要在这里添加
-    tool_node = ToolNode([dd_search, send_email])
-    builder.add_node("action", tool_node)
+    # 定义简化的图流程 - 删除记忆相关节点
+    builder.add_edge(START, "agent")  # 直接开始agent节点
+    builder.add_edge("agent", END)    # agent执行完直接结束
 
-    # 设置入口点
-    builder.add_edge(START, "agent")
-
-    # 添加条件边，决定是调用工具还是结束
-    builder.add_conditional_edges(
-        "agent",
-        tools_condition, # 使用预定义的 tools_condition 判断
-        {
-            "tools": "action", # 如果需要调用工具，转到 action 节点
-            END: END          # 如果不需要调用工具，结束
-        }
-    )
-
-    # 添加从工具执行节点返回 Agent 的边
-    builder.add_edge("action", "agent")
-
-    # 编译图 (Checkpointer 在 app.py 中编译时传入)
-    print("Graph definition with tool handling complete.")
+    # 编译图 (Checkpointer在app.py中编译时传入)
+    # 这里只返回builder，编译在app.py中进行
+    print("Graph definition complete.")
     return builder
 
 # 获取默认系统提示
 def get_default_system_message() -> SystemMessage:
     """返回默认的系统消息"""
-    # 可以在这里提示 Agent 它拥有网络搜索能力
-    content = os.environ.get("DEFAULT_SYSTEM_PROMPT", "你是一个乐于助人的AI助手。你可以使用 web_search 工具来查找实时信息或你不知道的事情。请利用提供的背景记忆（如果有的话）来更好地与用户交流。")
+    content = os.environ.get("DEFAULT_SYSTEM_PROMPT", "你是一个乐于助人的AI助手。请利用提供的背景记忆（如果有的话）来更好地与用户交流。")
     return SystemMessage(content=content)
 
 
 def process_graph_stream(graph, user_input: str, history=None, config=None):
-    """处理用户输入并返回最终 AI 回复的生成流 (修复版，支持工具调用下的流式输出)"""
+    """处理用户输入并返回生成的响应流"""
     # 准备消息输入
     messages_input = []
 
@@ -359,69 +340,37 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
     print(f"[LANGGRAPH] 正在处理 thread_id={thread_id} 的请求，消息历史长度: {len(messages_input)}")
     print(f"[LANGGRAPH] 当前请求的配置: {config}")
 
-    # 使用默认流模式，迭代图执行的每个步骤
+    # 使用 "messages" 模式流式传输 LLM 生成的内容
     try:
+        # 使用 RunnableConfig 确保配置正确传递
         langgraph_config = RunnableConfig(configurable=config.get("configurable", {}))
-        # 不指定 stream_mode，使用默认的节点输出流
-        final_content_streamed = False # 标志是否开始流式传输最终内容
+
+        # 使用 "messages" 模式，专门用于流式传输 LLM 令牌
         for event in graph.stream(
                 {"messages": messages_input},
-                config=langgraph_config
+                config=langgraph_config,
+                stream_mode="messages"  # 使用 messages 模式
         ):
-            # 打印原始事件以供调试
-            print(f"[LANGGRAPH STREAM RAW] Event: {event}")
+            # 更详细的调试信息
+            print(f"[LANGGRAPH STREAM] 收到事件: {type(event)}")
 
-            # --- 修改后的流处理逻辑 ---
-            # 检查事件数据结构，并寻找 agent 节点的输出块
-            for node_name, output in event.items():
-                # 我们只关心 agent 节点产生的最终回复流
-                if node_name == "agent":
-                    # agent 的输出应该是一个包含 messages 列表的字典
-                    if isinstance(output, dict) and "messages" in output:
-                        messages = output["messages"]
-                        if messages:
-                            # 获取 agent 返回的最后一条消息（或消息块）
-                            last_message_or_chunk = messages[-1]
-
-                            # 检查这是否是 AIMessage 的内容块 (chunk) 并且没有工具调用
-                            # LangGraph 流式传输 AIMessage 时，会先发送内容块
-                            # 然后最后发送完整的 AIMessage 对象
-                            if isinstance(last_message_or_chunk, AIMessage):
-                                # 如果是完整的 AIMessage 且没有 tool_calls，表示流结束
-                                if not last_message_or_chunk.tool_calls and last_message_or_chunk.content:
-                                     # 如果之前没有流式输出过任何内容块，
-                                     # 并且这个最终消息有内容，则一次性输出它
-                                     # (适用于非流式LLM或短回复)
-                                     if not final_content_streamed:
-                                         print(f"[LANGGRAPH STREAM] Yielding final message content: '{last_message_or_chunk.content}'")
-                                         yield last_message_or_chunk.content
-                                         final_content_streamed = True # 标记已输出
-                                     else:
-                                         # 如果已经流式输出了块，则不再重复输出完整消息
-                                         print(f"[LANGGRAPH STREAM] Final AIMessage object received, content already streamed.")
-                                         pass 
-                                # 如果有 tool_calls，忽略，这不是最终回复
-                                elif last_message_or_chunk.tool_calls:
-                                    print(f"[LANGGRAPH STREAM] Agent decided to call tools: {last_message_or_chunk.tool_calls}")
-                                    pass # 忽略工具调用消息
-
-                            # 检查是否是内容块 (适用于支持流式输出的LLM)
-                            # LangChain/LangGraph 通常会将流式块作为 AIMessageChunk 或直接内容字符串传递
-                            # 这里我们检查 content 属性
-                            elif hasattr(last_message_or_chunk, 'content'):
-                                chunk_content = last_message_or_chunk.content
-                                # 确保内容非空再 yield
-                                if chunk_content:
-                                    print(f"[LANGGRAPH STREAM] Yielding content chunk: '{chunk_content}'")
-                                    yield chunk_content
-                                    final_content_streamed = True # 标记已开始流式输出
-                            # 可能直接是字符串块 (不太常见，但兼容一下)
-                            elif isinstance(last_message_or_chunk, str) and last_message_or_chunk:
-                                 print(f"[LANGGRAPH STREAM] Yielding string chunk: '{last_message_or_chunk}'")
-                                 yield last_message_or_chunk
-                                 final_content_streamed = True
-
-            # --- 结束修改后的流处理逻辑 ---
+            # event 会包含 LLM 生成的令牌和元数据
+            if isinstance(event, tuple) and len(event) >= 1:
+                token = event[0]
+                # 尝试提取内容部分
+                if hasattr(token, 'content') and token.content:
+                    print(f"[LANGGRAPH STREAM] 发送token: '{token.content}'")
+                    yield token.content
+                elif isinstance(token, str):
+                    print(f"[LANGGRAPH STREAM] 发送字符串token: '{token}'")
+                    yield token
+            # 直接处理消息对象
+            elif hasattr(event, 'content') and event.content:
+                print(f"[LANGGRAPH STREAM] 发送内容: '{event.content}'")
+                yield event.content
+            elif isinstance(event, str):
+                print(f"[LANGGRAPH STREAM] 发送字符串: '{event}'")
+                yield event
 
         print(f"[LANGGRAPH] thread_id={thread_id} 的请求处理完成")
     except Exception as e:

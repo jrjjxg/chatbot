@@ -2,7 +2,7 @@ import os
 import time
 import uuid
 import threading
-from flask import Flask, request, Response, jsonify, g, stream_with_context
+from flask import Flask, request, Response, jsonify, g
 from flask_cors import CORS
 import json
 import psycopg # 确保导入psycopg
@@ -117,7 +117,59 @@ def create_diary_prompt(journal):
     
     return prompt
 
-
+# 修改 thread_manager.py 中的 save_message 函数（如果不能直接修改，这里提供一个增强版本）
+def save_message_enhanced(user_id, thread_id, role, content, msg_type='text', metadata=None):
+    """保存消息到会话历史，支持特殊类型的消息"""
+    try:
+        messages_file = os.path.join("data", "messages.json")
+        
+        try:
+            if os.path.exists(messages_file):
+                with open(messages_file, 'r', encoding='utf-8') as f:
+                    messages_data = json.load(f)
+            else:
+                messages_data = {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            messages_data = {}
+        
+        # 创建消息对象
+        timestamp = datetime.datetime.now().isoformat()
+        message_id = f"{role}-{int(time.time()*1000)}"
+        
+        # 基本消息结构
+        message = {
+            "id": message_id,
+            "role": role,
+            "content": content,
+            "timestamp": timestamp
+        }
+        
+        # 处理特殊类型消息
+        if msg_type != 'text':
+            message["type"] = msg_type
+            
+            # 如果是日记分享卡片，添加额外字段
+            if msg_type == 'diary_share' and metadata:
+                for key, value in metadata.items():
+                    if key not in message:  # 避免覆盖基本字段
+                        message[key] = value
+        
+        # 确保线程ID存在
+        if thread_id not in messages_data:
+            messages_data[thread_id] = []
+        
+        # 添加消息
+        messages_data[thread_id].append(message)
+        
+        # 写入文件
+        with open(messages_file, 'w', encoding='utf-8') as f:
+            json.dump(messages_data, f, ensure_ascii=False, indent=2)
+            
+        print(f"消息已保存 - 线程: {thread_id}, 角色: {role}, 类型: {msg_type}")
+        return True
+    except Exception as e:
+        print(f"保存消息失败: {str(e)}")
+        return False
 
 # 初始化 Flask 应用
 app = Flask(__name__)
@@ -180,11 +232,6 @@ pool = ConnectionPool(
     max_idle=60*2  # 空闲连接最多保留2分钟
 )
 print("数据库连接池创建成功。")
-
-# --- 新增: 初始化 ThreadManager 的数据库连接池 ---
-from thread_manager import initialize_db_pool
-initialize_db_pool(pool) 
-# --- 结束新增 ---
 
 # 使用连接池初始化Checkpointer和Store
 print("正在使用连接池初始化Checkpointer和Store...")
@@ -263,30 +310,25 @@ def chat_stream_api():
         print(f"使用规范化后的 thread_id: {thread_id}，关联的用户ID: {actual_user_id}")
 
         # 直接从线程存储中获取自定义系统提示词
-        default_system_prompt = get_default_system_message().content # 使用 main.py 中的函数获取默认值
+        default_system_prompt = "你是一个有用的AI助手。"
         custom_system_prompt = None
 
-        # --- 修改：从数据库获取线程信息 ---
-        try:
-            user_threads = get_user_threads(actual_user_id) # 从数据库获取用户的所有线程
-            if isinstance(user_threads, dict) and thread_id in user_threads:
-                thread_info = user_threads[thread_id]
-                custom_system_prompt = thread_info.get('system_prompt')
-                if custom_system_prompt:
-                    print(f"从数据库找到用户 '{actual_user_id}' 的线程 '{thread_id}' 的自定义系统提示词: {custom_system_prompt}")
-                else:
-                     print(f"线程 '{thread_id}' 在数据库中存在，但没有设置自定义系统提示词。")
-            else:
-                # 增加对 get_user_threads 可能返回错误信息的处理 (例如 {"error": ...})
-                if isinstance(user_threads, dict) and 'error' in user_threads:
-                     print(f"从数据库获取用户 '{actual_user_id}' 的线程列表时出错: {user_threads['error']}")
-                else:
-                     print(f"在数据库中未找到用户 '{actual_user_id}' 的线程 '{thread_id}'。")
-
-        except Exception as e:
-            print(f"从数据库获取线程信息时发生异常: {e}")
-            # 出错时也回退到默认提示词
-        # --- 结束修改 ---
+        # 读取存储的线程数据
+        threads_file = os.path.join("data", "threads.json")
+        if os.path.exists(threads_file):
+            try:
+                with open(threads_file, 'r', encoding='utf-8') as f:
+                    thread_data = json.load(f)
+                    # 使用从thread_id提取或确认后的 actual_user_id 进行查找
+                    if actual_user_id in thread_data and thread_id in thread_data[actual_user_id]:
+                        # 读取自定义system_prompt
+                        custom_system_prompt = thread_data[actual_user_id][thread_id].get('system_prompt')
+                        print(
+                            f"找到用户 '{actual_user_id}' 的线程 '{thread_id}' 的自定义系统提示词: {custom_system_prompt}")
+                    else:
+                        print(f"在用户 '{actual_user_id}' 下未找到线程 '{thread_id}' 或其自定义提示词")
+            except Exception as e:
+                print(f"读取线程文件出错: {e}")
 
         # 确定使用哪个系统提示词
         system_prompt = custom_system_prompt if custom_system_prompt else default_system_prompt
@@ -296,12 +338,26 @@ def chat_stream_api():
         thread_key = thread_id
         history_messages = []
 
-        # --- 修改：移除手动从JSON加载历史记录，LangGraph Checkpoint 会处理 ---
-        # Checkpoint 会自动加载历史记录，我们只需传递当前的用户输入和系统提示即可
-        # 构建初始消息列表（只包含系统提示，LangGraph 会自动添加历史）
+        # 读取消息文件
+        messages_file = os.path.join("data", "messages.json")
+        if os.path.exists(messages_file):
+            try:
+                with open(messages_file, 'r', encoding='utf-8') as f:
+                    messages_data = json.load(f)
+                    if thread_key in messages_data:
+                        history_messages = messages_data[thread_key]
+            except Exception as e:
+                print(f"读取消息历史出错: {e}")
+
+        # 构建消息列表
         messages = [SystemMessage(content=system_prompt)]
-        print(f"准备传递给 LangGraph 的初始消息（包含系统提示，历史由 Checkpoint 加载）: {messages}")
-        # --- 结束修改 ---
+        for msg in history_messages:
+            if msg['role'] == 'user':
+                messages.append(HumanMessage(content=msg['content']))
+            elif msg['role'] == 'assistant':
+                messages.append(AIMessage(content=msg['content']))
+
+        print(f"构建的对话历史长度: {len(messages)}，第一条是系统提示词: {messages[0].content}")
 
         # 检查是否为日记分享触发消息
         is_share_trigger = user_message.startswith('//share_diary:')
@@ -344,32 +400,33 @@ def chat_stream_api():
             full_response = ""
             yield f"event: start\ndata: {json.dumps({'response_id': response_id})}\n\n"
             
-            # 如果是日记分享，先保存卡片消息 (使用统一的 save_message)
+            # 如果是日记分享，先保存卡片消息
             if is_share_trigger and diary_details:
                 try:
-                    card_id = f"diary-{shared_diary_id}-{int(time.time())}" # ID可以简化
+                    # 创建卡片消息
+                    card_id = f"diary-{shared_diary_id}-{int(time.time())}"
                     card_metadata = {
                         "diaryId": shared_diary_id,
                         "diaryTitle": diary_details.get("title", "无标题日记"),
-                        "diaryDate": diary_details.get("createTime") 
+                        "diaryDate": diary_details.get("createTime")
                     }
                     
-                    # --- 修改点: 调用 thread_manager 的 save_message ---
-                    save_message( 
+                    # 保存卡片消息
+                    save_message_enhanced(
                         actual_user_id,
                         thread_id,
-                        "system", # 卡片用 system 角色
-                        f"分享了日记: {card_metadata['diaryTitle']}", 
-                        msg_type='diary_share', 
-                        metadata=card_metadata
+                        "system",  # 用system角色
+                        f"分享了日记: {card_metadata['diaryTitle']}",  # 显示内容
+                        msg_type='diary_share',  # 特殊类型
+                        metadata=card_metadata  # 额外数据
                     )
-                    print(f"已请求保存日记分享卡片到数据库: {thread_id}")
+                    print(f"已保存日记分享卡片: {card_id}")
                 except Exception as e:
-                    print(f"尝试保存日记分享卡片时出错: {e}")
+                    print(f"保存日记分享卡片失败: {e}")
 
             for chunk in process_graph_stream(
                     app.runnable,
-                    input_for_llm, 
+                    input_for_llm,  # 使用可能经过处理的消息
                     history=messages,
                     config=config
             ):
@@ -378,13 +435,21 @@ def chat_stream_api():
 
             yield f"event: complete\ndata: {json.dumps({'full_response': full_response, 'response_id': response_id})}\n\n"
 
-            # 保存消息到历史记录 (统一使用 save_message)
-            # --- 修改点: 统一调用 save_message ---
-            save_message(actual_user_id, thread_id, "user", user_message) # 保存用户消息（包括触发消息）
-            save_message(actual_user_id, thread_id, "assistant", full_response) # 保存AI回复
+            # 保存消息到历史记录
+            # 对于分享触发消息，保存触发消息本身（可选）
+            if not is_share_trigger:
+                # 只保存非触发的普通用户消息
+                save_message(actual_user_id, thread_id, "user", user_message)
+            else:
+                # 触发消息可以选择保存或不保存
+                # 这里选择保存，方便调试，如果不需要可以去掉
+                save_message(actual_user_id, thread_id, "user", user_message)
+            
+            # 保存AI回复
+            save_message(actual_user_id, thread_id, "assistant", full_response)
 
         return Response(
-            stream_with_context(generate()),
+            generate(),
             mimetype='text/event-stream',
             headers={
                 'Cache-Control': 'no-cache',
@@ -445,50 +510,20 @@ def get_threads():
 
 @app.route('/api/history/<thread_id>', methods=['GET'])
 def get_history(thread_id):
-    """获取聊天历史记录 (自动从 thread_id 推断 userId)"""
-    print(f"--- History Request ---") 
-    print(f"Received thread_id (from path): {thread_id}")
-
-    # --- 新增: 尝试从 thread_id 提取 user_id ---
-    actual_user_id = None
-    if '_' in thread_id:
-        try:
-            # 假设格式为 "userid_uuid"
-            actual_user_id = thread_id.split('_')[0] 
-            print(f"Extracted user_id from thread_id: {actual_user_id}")
-        except Exception as e:
-            print(f"从 thread_id 提取 user_id 时出错: {e}")
-            # 提取失败，保持 actual_user_id 为 None
-
-    if not actual_user_id:
-        
-        print(f"错误: 无法从 thread_id '{thread_id}' 提取有效的用户ID。")
-        return jsonify({'error': f"无法从线程ID '{thread_id}' 确定用户"}), 400
-     
-    # --- 结束新增 ---
-        
-    # --- 修改点: 使用推断出的 actual_user_id 调用 get_chat_history ---
-    if not thread_id: # 理论上不会发生，因为 thread_id 是路径参数
-         return jsonify({'error': '缺少必要参数 threadId'}), 400
-
-    print(f"Calling get_chat_history with inferred user_id: '{actual_user_id}' and thread_id: '{thread_id}'")
+    """获取聊天历史记录"""
     try:
-        # 调用 thread_manager 中的数据库版本 get_chat_history
-        history = get_chat_history(actual_user_id, thread_id) 
-        
-        # 检查 get_chat_history 是否返回了错误信息
-        if history.get("error"):
-             print(f"get_chat_history 返回错误: {history.get('error')}")
-             # 可以选择将数据库错误暴露给前端，或返回通用错误
-             return jsonify({'error': f"获取历史记录失败: {history.get('error')}"}), 500
+        user_id = request.args.get('userId')
 
-        print(f"History data retrieved successfully for thread {thread_id}")
-        return jsonify(history) # 返回 {"data": [...]} 或 {"data": [], "error": ...}
-        
+        if not user_id or not thread_id:
+            return jsonify({'error': '缺少必要参数 userId 或 threadId'}), 400
+
+        # 获取聊天历史
+        history = get_chat_history(user_id, thread_id)
+
+        return jsonify(history)
     except Exception as e:
-        print(f"调用 get_chat_history 或处理结果时出错: {e}")
-        traceback.print_exc() # 打印详细堆栈信息
-        return jsonify({'error': f'获取聊天历史时发生内部错误: {str(e)}'}), 500
+        print(f"获取聊天历史时出错: {e}")
+        return jsonify({'error': f'获取聊天历史时出错: {str(e)}'}), 500
 
 
 @app.route('/api/thread/<thread_id>', methods=['DELETE'])

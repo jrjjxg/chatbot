@@ -205,3 +205,15 @@ def create_optimize_search_memory_tool(store):
     
     return search_memory
 
+# DuckDuckGo Web Search Tool
+from langchain_community.tools import DuckDuckGoSearchRun
+
+dd_search = DuckDuckGoSearchRun()
+dd_search.name = "web_search"
+dd_search.description = "Use this tool to search the internet for current events, real-time information, or topics outside your internal knowledge base. Input should be a search query."
+
+# 导出所有可用的工具 (方便在main.py中导入)
+all_tools = [send_email]
+# 注意：记忆管理和搜索工具需要 store 实例才能创建，
+# 所以它们不能直接在这里导出，需要在 main.py 中创建 store 后再创建。
+
