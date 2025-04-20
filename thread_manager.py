@@ -4,11 +4,13 @@ import json
 import os
 import datetime
 import psycopg
+import calendar # 导入 calendar 模块
 from psycopg.rows import dict_row # 用于将查询结果转为字典
 from psycopg_pool import ConnectionPool
 import traceback
 from typing import List, Dict, Any, Optional
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from collections import defaultdict # 导入 defaultdict
 
 # 全局变量，用于存储从 app.py 传入的连接池
 db_pool: ConnectionPool = None
@@ -102,7 +104,7 @@ class ThreadManager:
             traceback.print_exc()
             return False
 
-    def get_user_threads(self, user_id: str) -> list:
+    def get_user_threads(self, user_id: str, group_by_date: bool = False) -> list:
         """从数据库获取用户的所有线程信息"""
         if not db_pool:
             print("错误: 数据库连接池未初始化。")
@@ -216,6 +218,52 @@ class ThreadManager:
                 print(f"数据库错误，消息备份也失败了: {str(backup_error)}")
             return False
 
+    # --- 新增：保存文件上传消息 ---
+    def save_file_upload_message(self, user_id: str, thread_id: str, filename: str, file_type: str) -> bool:
+        """
+        将文件上传事件作为一个特殊消息保存到数据库，以便在聊天记录中显示。
+        """
+        if not db_pool:
+            print("错误: 数据库连接池未初始化，无法保存文件上传消息。")
+            # 可以考虑添加备份逻辑，但对于这种系统消息可能不是必须的
+            return False
+
+        print(f"[ThreadManager] Saving file upload message for thread {thread_id}: {filename} ({file_type})")
+
+        try:
+            with db_pool.connection() as conn:
+                with conn.cursor() as cur:
+                    sql = """
+                    INSERT INTO app_messages
+                    (thread_id, user_id, role, content, msg_type, metadata, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """
+                    # 使用 'system' 或 'file_upload' 作为角色，'file_info' 作为消息类型
+                    role = 'system' # 或者可以定义一个更具体的角色
+                    msg_type = 'file_info'
+                    # Content 可以是描述性的，或者就是文件名
+                    content = f"用户上传了文件: {filename}"
+                    # 将文件名和类型存入 metadata
+                    metadata_dict = {"filename": filename, "file_type": file_type}
+                    metadata_json = json.dumps(metadata_dict, ensure_ascii=False)
+                    timestamp = datetime.datetime.now(datetime.timezone.utc)
+
+                    cur.execute(
+                        sql,
+                        (thread_id, user_id, role, content, msg_type, metadata_json, timestamp)
+                    )
+                    message_id = cur.fetchone()[0]
+                    conn.commit()
+                    print(f"[ThreadManager] 文件上传消息已保存到数据库 - ID: {message_id}, 线程: {thread_id}")
+                    return True
+
+        except Exception as e:
+            print(f"[ThreadManager] 保存文件上传消息到数据库失败: {str(e)}")
+            traceback.print_exc()
+            return False
+    # --- 结束新增 ---
+
     def get_chat_history(self, user_id: str, thread_id: str) -> dict:
         """从PostgreSQL数据库获取聊天历史记录"""
         if not db_pool:
@@ -241,21 +289,40 @@ class ThreadManager:
                         message = {
                             "id": f"msg-{row['id']}", # 使用数据库ID构造唯一前端ID
                             "role": row['role'],
-                            "content": row['content'],
                             "timestamp": row['timestamp'].isoformat() if row['timestamp'] else None
                         }
                         
                         msg_type = row.get('msg_type')
+                        # 处理消息类型
                         if msg_type and msg_type != 'text':
                             message["type"] = msg_type
-                            
-                            metadata_json = row.get('metadata')
+                        
+                        metadata_json = row.get('metadata')
+                        print(f"metadata_json类型: {type(metadata_json)}, 值: {metadata_json}")
+                        
+                        # 处理消息内容
+                        if msg_type == 'file_info':
+                            # 对于file_info类型，拼接文件信息作为字符串
                             if metadata_json:
-                                # metadata 直接就是字典，不需要 loads
-                                metadata = metadata_json 
-                                for key, value in metadata.items():
-                                    if key not in message:
-                                        message[key] = value
+                                # 直接将metadata添加到message对象中
+                                for key, value in metadata_json.items():
+                                    message[key] = value
+                                
+                                # 将content作为message字段
+                                message["message"] = f"用户上传了文件: {metadata_json.get('filename', '未知文件')}"
+                            else:
+                                # 如果没有metadata，使用content作为后备
+                                message["message"] = row['content']
+                        else:
+                            # 对于其他类型的消息，使用content字段
+                            message["message"] = row['content']
+                        
+                        # 处理其他类型消息的metadata
+                        if metadata_json and msg_type != 'file_info':
+                            # 确保所有消息类型都有metadata相关字段
+                            for key, value in metadata_json.items():
+                                if key not in message:
+                                    message[key] = value
                                     
                         messages.append(message)
                         
@@ -290,6 +357,83 @@ class ThreadManager:
 
         return messages
 
+    def get_threads_dates_by_month(self, user_id: str, year: int, month: int) -> dict:
+        """获取特定用户在特定月份的所有线程，并按日期分组。
+        
+        Args:
+            user_id: 用户ID
+            year: 年份
+            month: 月份 (1-12)
+            
+        Returns:
+            包含日期到线程列表映射的字典: 
+            { "YYYY-MM-DD": [thread1, thread2], ... }
+            或包含错误的字典: { "error": "..." }
+        """
+        if not db_pool:
+            print("错误: 数据库连接池未初始化。")
+            return {"error": "数据库连接池未初始化"}
+        
+        # 使用 defaultdict 更方便地按日期分组
+        threads_by_date = defaultdict(list)
+        try:
+            # 计算月份的起始和结束日期
+            start_date = datetime.date(year, month, 1)
+            if month == 12:
+                next_month_start_date = datetime.date(year + 1, 1, 1)
+            else:
+                next_month_start_date = datetime.date(year, month + 1, 1)
+
+            print(f"查询日期范围: >= {start_date} and < {next_month_start_date}")
+            
+            with db_pool.connection() as conn:
+                # 使用 dict_row 获取字典形式的线程数据
+                with conn.cursor(row_factory=dict_row) as cur:
+                    # 查询指定用户和月份范围内的所有线程，包含最后消息预览
+                    # 按 updated_at 排序，确保每个日期的线程列表内部有序
+                    sql = """
+                    SELECT 
+                        t.thread_id as id, 
+                        t.title, 
+                        t.system_prompt, 
+                        t.created_at, 
+                        t.updated_at,
+                        (SELECT content FROM app_messages m WHERE m.thread_id = t.thread_id ORDER BY m.timestamp DESC LIMIT 1) as "lastMessagePreview",
+                        (SELECT timestamp FROM app_messages m WHERE m.thread_id = t.thread_id ORDER BY m.timestamp DESC LIMIT 1) as "lastMessageTime"
+                    FROM app_threads t
+                    WHERE t.user_id = %s 
+                    AND t.created_at >= %s -- 使用 created_at 作为日期依据
+                    AND t.created_at < %s
+                    ORDER BY t.created_at DESC; -- 按创建时间排序，新的在前
+                    """
+                    cur.execute(sql, (user_id, start_date, next_month_start_date))
+                    threads = cur.fetchall()
+                    
+                    # 按日期分组
+                    for thread in threads:
+                        # 确保 created_at 是 datetime 对象
+                        created_at_dt = thread.get("created_at")
+                        if isinstance(created_at_dt, datetime.datetime):
+                            date_str = created_at_dt.strftime("%Y-%m-%d")
+                            # 转换其他日期为 ISO 格式字符串
+                            if thread.get("updated_at"):
+                                thread["updated_at"] = thread["updated_at"].isoformat()
+                            if thread.get("lastMessageTime"):
+                                thread["lastMessageTime"] = thread["lastMessageTime"].isoformat()
+                            thread["createdAt"] = created_at_dt.isoformat() # 保持前端使用的字段名
+                            
+                            threads_by_date[date_str].append(thread)
+                        else:
+                            print(f"警告: 线程 {thread.get('id')} 的 created_at 不是有效的 datetime 对象: {created_at_dt}")
+
+                    print(f"从数据库获取到用户 {user_id} 在 {year}-{month} 月份的线程，按日期分组完成。共 {len(threads_by_date)} 天有记录。")
+        except Exception as e:
+            print(f"从数据库获取并分组线程失败: {e}")
+            traceback.print_exc()
+            return {"error": str(e)} # 返回带错误的字典
+            
+        return dict(threads_by_date) # 将 defaultdict 转为普通 dict 返回
+
 
 # 创建全局实例
 thread_manager = ThreadManager()
@@ -300,8 +444,8 @@ def save_thread(user_id: str, thread_id: str, title: str, system_prompt: str = N
     return thread_manager.save_thread(user_id, thread_id, title, system_prompt)
 
 
-def get_user_threads(user_id: str) -> list:
-    return thread_manager.get_user_threads(user_id)
+def get_user_threads(user_id: str, group_by_date: bool = False) -> list:
+    return thread_manager.get_user_threads(user_id, group_by_date)
 
 
 def remove_thread(user_id: str, thread_id: str) -> bool:
@@ -312,10 +456,20 @@ def save_message(user_id: str, thread_id: str, role: str, content: str, msg_type
     return thread_manager.save_message(user_id, thread_id, role, content, msg_type, metadata)
 
 
+def save_file_upload_message(user_id: str, thread_id: str, filename: str, file_type: str) -> bool:
+    """模块级函数，调用 ThreadManager 实例的方法"""
+    return thread_manager.save_file_upload_message(user_id, thread_id, filename, file_type)
+
+
 def get_chat_history(user_id: str, thread_id: str) -> dict:
     return thread_manager.get_chat_history(user_id, thread_id)
 
 
 def get_thread_messages(user_id: str, thread_id: str, system_prompt: str) -> List:
     return thread_manager.get_thread_messages(user_id, thread_id, system_prompt)
+
+
+def get_threads_dates_by_month(user_id: str, year: int, month: int) -> dict:
+    """获取特定用户在特定月份的所有线程，并按日期分组 (模块级接口)"""
+    return thread_manager.get_threads_dates_by_month(user_id, year, month)
 

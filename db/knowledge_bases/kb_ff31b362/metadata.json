@@ -1,0 +1,35 @@
+{
+  "id": "kb_ff31b362",
+  "name": "12",
+  "description": "",
+  "created_at": "2025-04-20T08:59:52.444231",
+  "updated_at": "2025-04-20T09:01:30.319113",
+  "created_by": "testuser",
+  "document_count": 3,
+  "documents": [
+    {
+      "id": "34015d4a-49d5-49e3-a862-fe73f3dddbdf",
+      "name": "Depression_evidence_Chinese.pdf",
+      "path": "docs\\Depression_evidence_Chinese.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-20T09:00:14.578990",
+      "size": 560335
+    },
+    {
+      "id": "8e923a2b-7f7a-4910-a275-7e1d2ba5e85f",
+      "name": "C.txt",
+      "path": "docs\\C.txt",
+      "type": "txt",
+      "added_at": "2025-04-20T09:00:47.754351",
+      "size": 16420
+    },
+    {
+      "id": "ed92fb65-bede-4bda-8e52-f2340215aa83",
+      "name": "Depression_evidence_Chinese.pdf",
+      "path": "docs\\Depression_evidence_Chinese.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-20T09:01:30.319113",
+      "size": 560335
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "id": "kb_19de6e54",
+  "name": "11",
+  "description": "11",
+  "created_at": "2025-04-20T04:46:35.268065",
+  "updated_at": "2025-04-20T08:57:04.156563",
+  "created_by": "system",
+  "document_count": 3,
+  "documents": [
+    {
+      "id": "43e67a0a-a7fc-43a1-95dd-3e92e59b67b1",
+      "name": "Depression_evidence_Chinese.pdf",
+      "path": "docs\\Depression_evidence_Chinese.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-20T05:05:55.860893",
+      "size": 560335
+    },
+    {
+      "id": "6f0bb5bb-abf5-42e8-bce2-8faeb596ba9d",
+      "name": "PoleEmploi.pdf",
+      "path": "docs\\PoleEmploi.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-20T05:08:14.137761",
+      "size": 27360917
+    },
+    {
+      "id": "dd8cc9cd-bf87-4ba6-8df3-19988ed93175",
+      "name": "List.txt",
+      "path": "docs\\List.txt",
+      "type": "txt",
+      "added_at": "2025-04-20T08:57:04.156204",
+      "size": 0
+    }
+  ]
+}
