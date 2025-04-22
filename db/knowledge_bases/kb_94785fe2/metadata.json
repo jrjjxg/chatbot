@@ -1,0 +1,35 @@
+{
+  "id": "kb_94785fe2",
+  "name": "自杀预防与抑郁症",
+  "description": "",
+  "created_at": "2025-04-22T18:04:55.583883",
+  "updated_at": "2025-04-22T19:47:05.087032",
+  "created_by": "system",
+  "document_count": 3,
+  "documents": [
+    {
+      "id": "e81269cb-ffd6-4c54-8195-0a27931f507f",
+      "name": "Depression_evidence_Chinese.pdf",
+      "path": "docs\\Depression_evidence_Chinese.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-22T18:05:08.314913",
+      "size": 560335
+    },
+    {
+      "id": "25ca4cf3-52a8-4d16-990b-b928cb416230",
+      "name": "zishayufang.pdf",
+      "path": "docs\\zishayufang.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-22T18:05:28.610287",
+      "size": 422990
+    },
+    {
+      "id": "08c99f34-793b-41b9-9278-3d18495ba77e",
+      "name": "AHC_MentalHealth_RsrcGuide_2022_Chinese_03.pdf",
+      "path": "docs\\AHC_MentalHealth_RsrcGuide_2022_Chinese_03.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-22T19:47:05.087032",
+      "size": 12785301
+    }
+  ]
+}

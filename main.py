@@ -13,7 +13,8 @@ import asyncio
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # 用于 OpenAI 兼容 API
 from langchain.docstore.document import Document # To represent documents
-
+from dotenv import load_dotenv
+load_dotenv()  # 加载.env文件中的环境变量
 
 from typing_extensions import TypedDict
 from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage, AIMessage, ToolMessage
@@ -28,9 +29,20 @@ from tools import dd_search, send_email
 # 从 .env 文件加载环境变量
 load_dotenv()
 
+
+def get_llm():
+    """获取配置好的 LLM 实例"""
+    return ChatOpenAI(
+        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),  # 允许通过环境变量指定模型
+        api_key=os.environ.get("DEEPSEEK_API_KEY"),
+        base_url=os.environ.get("OPENAI_API_BASE"),
+        temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),  # 允许通过环境变量配置温度
+        streaming=True  # 启用流式输出
+    )
+
+
 # --- RAG Configuration ---
 VECTORSTORE_BASE_PATH = "./db/vectorstores" # Base path for ChromaDB collections
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2" # Or configure OpenAIEmbeddings()
 # --- End RAG Configuration ---
 
 # --- Tiktoken计数器 ---
@@ -80,6 +92,8 @@ def count_message_tokens(messages: list[BaseMessage]) -> int:
     return num_tokens
 # --- 结束 Tiktoken计数器 ---
 
+
+
 # 定义图的状态结构
 def message_list_manager(existing: list, updates: Union[list, Dict]) -> List:
     """自定义消息列表管理器"""
@@ -115,16 +129,6 @@ class State(TypedDict):
     messages: Annotated[list, message_list_manager]
     retrieved_memories: Annotated[list[str], lambda x, y: x + y] = []
 
-
-def get_llm():
-    """获取配置好的 LLM 实例"""
-    return ChatOpenAI(
-        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),  # 允许通过环境变量指定模型
-        api_key=os.environ.get("DEEPSEEK_API_KEY"),
-        base_url=os.environ.get("OPENAI_API_BASE"),
-        temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),  # 允许通过环境变量配置温度
-        streaming=True  # 启用流式输出
-    )
 
 
 def format_messages_for_summary(messages: List) -> str:
@@ -250,7 +254,10 @@ def create_graph():
 
     # 定义 Agent 节点
     def agent(state: AgentState):
-        """LLM Agent 节点，决定是回复还是调用工具"""
+        print(f"[Agent Node] Debug - state keys: {list(state.keys())}")
+        if "config" in state:
+            print(f"[Agent Node] Debug - config structure: {state['config']}")
+        
         messages_from_state = state["messages"]
 
         # --- 消息验证和修复逻辑 (保留) ---
@@ -316,7 +323,106 @@ def create_graph():
 
         print(f"[Agent Node] Validated messages before trim/summary: {len(valid_messages)} messages")
 
-        # --- 新增：系统消息去重逻辑 ---
+        # --- 移动 RAG 检查逻辑到最前面 ---
+        # 配置来源检查 - 检查多种可能的路径
+        rag_enhanced = False
+        skip_history = False
+        # 方式3: 检查是否在消息中包含了RAG标记(这是最可靠的方法)
+        if "messages" in state:
+            # 检查是否有RAG系统消息作为标记
+            has_rag_message = any("请根据以下提供的文档内容回答用户问题" in (msg.content if hasattr(msg, "content") else "") 
+                                for msg in valid_messages if isinstance(msg, SystemMessage))
+            if has_rag_message:
+                rag_enhanced = True
+                skip_history = True
+                print(f"[Agent Node] 方式3基于消息内容推断: rag_enhanced={rag_enhanced}, skip_history={skip_history}")
+        
+        # --- 如果是 RAG 模式，直接处理并返回 --- 
+        if rag_enhanced and skip_history:
+            print("[Agent Node] RAG增强模式启用，且跳过历史消息")
+
+
+
+
+
+
+
+
+            # 1. 找到所有RAG系统消息和用户消息 (从原始 valid_messages 中找)
+            rag_system_msgs = [msg for msg in valid_messages if isinstance(msg, SystemMessage) 
+                             and "请根据以下提供的文档内容回答用户问题" in msg.content]
+            user_msgs = [msg for msg in valid_messages if isinstance(msg, HumanMessage)]
+            
+
+
+
+            
+
+
+
+
+
+
+            # 打印调试信息
+            print(f"[Agent Node] RAG系统消息数量 (原始): {len(rag_system_msgs)}")
+            for i, msg in enumerate(rag_system_msgs):
+                content_preview = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+                print(f"[Agent Node] RAG系统消息 #{i+1} 预览: {content_preview}")
+            
+            print(f"[Agent Node] 用户消息数量 (原始): {len(user_msgs)}")
+            for i, msg in enumerate(user_msgs):
+                print(f"[Agent Node] 用户消息 #{i+1}: {msg.content}")
+            
+            # 2. 确保只使用最新的RAG系统消息（通常是最后一个，包含最新检索结果）
+            latest_rag_msg = rag_system_msgs[-1] if rag_system_msgs else None
+            
+            # 3. 获取最新的用户消息（当前问题）
+            latest_user_msg = user_msgs[-1] if user_msgs else None
+            
+            # 4. 构建最终消息列表
+            final_messages_for_llm = []
+            if latest_rag_msg:
+                final_messages_for_llm.append(latest_rag_msg)
+            else:
+                print("[Agent Node] 警告: RAG模式下未找到有效的RAG系统消息！可能处理流程有误。")
+                # 可以考虑添加一个默认的系统消息或错误处理
+
+            # 5. 可选：添加AI最后的回复（如果有且需要） - 按需添加
+            # ai_msgs = [msg for msg in valid_messages if isinstance(msg, AIMessage)]
+            # ... (添加逻辑) ...
+            
+            # 6. 添加当前用户提问
+            if latest_user_msg:
+                final_messages_for_llm.append(latest_user_msg)
+            else:
+                 print("[Agent Node] 警告: RAG模式下未找到有效的用户消息！")
+            
+            print(f"[Agent Node] RAG模式：使用 {len(final_messages_for_llm)} 条消息 ({len([m for m in final_messages_for_llm if isinstance(m, SystemMessage)])} 系统 + {len([m for m in final_messages_for_llm if not isinstance(m, SystemMessage)])} 最新)")
+            
+            # 跳过后续的修剪和摘要逻辑，直接调用 LLM
+            print(f"[Agent Node] Final messages passed to LLM: {len(final_messages_for_llm)} messages")
+            print(f"[Agent Node] Final messages detail:\n{final_messages_for_llm}")
+            
+            print(f"[Agent Node] Calling LLM with {len(final_messages_for_llm)} messages...")
+            try:
+                response = llm_with_tools.invoke(final_messages_for_llm)
+                print(f"[Agent Node] LLM Response received: type={type(response)}, content={str(response.content)[:100]}...")
+                return {"messages": [response]}
+            except Exception as llm_error:
+                print(f"[Agent Node] Error during LLM invocation: {llm_error}")
+                import traceback
+                traceback.print_exc()
+                response = AIMessage(content=f"抱歉，处理您的请求时发生错误。")
+          
+                return {"messages": [response]}
+        
+       
+       
+       
+        # --- 如果不是 RAG 模式，执行原来的去重和裁剪逻辑 --- 
+        print("[Agent Node] 非 RAG 模式，执行常规消息处理流程")
+        
+        # --- 系统消息去重逻辑 ---
         def deduplicate_system_messages(messages):
             """去除重复的系统消息，合并相似内容"""
             system_messages = [msg for msg in messages if isinstance(msg, SystemMessage)]
@@ -383,58 +489,6 @@ def create_graph():
         MAX_TOKENS = int(os.environ.get("MAX_CONTEXT_TOKENS", 3000)) # 从环境变量获取或默认
         SUMMARIZE_THRESHOLD = int(os.environ.get("SUMMARIZE_MSG_COUNT", 10)) # 超过多少条非系统消息时考虑摘要
         SUMMARIZE_TOKEN_THRESHOLD = int(os.environ.get("SUMMARIZE_TOKEN_THRESHOLD", MAX_TOKENS * 0.6)) # Token阈值，默认为最大上下文的60%
-
-        # --- 新增：检查是否使用RAG增强，且需要跳过历史消息 ---
-        config_dict = {}
-        if state.get("config") and state["config"].get("configurable"):
-            config_dict = state["config"]["configurable"]
-        
-        rag_enhanced = config_dict.get("rag_enhanced", False)
-        skip_history = config_dict.get("skip_history", False)
-        
-        if rag_enhanced and skip_history:
-            print("[Agent Node] RAG增强模式启用，且跳过历史消息")
-            # 在RAG模式下，我们只保留系统消息和最新的消息（这些已经包含RAG检索内容）
-            # 找到最后几条消息（通常是RAG上下文和新问题）
-            # 假设最后3条消息为：系统提示、RAG上下文、用户问题
-            last_messages = valid_messages[-3:] if len(valid_messages) >= 3 else valid_messages
-            
-            # 确保保留所有系统消息
-            system_msgs = [msg for msg in valid_messages if isinstance(msg, SystemMessage)]
-            
-            # 去重合并
-            final_messages_for_llm = []
-            for msg in system_msgs:
-                if not any(isinstance(m, SystemMessage) and m.content == msg.content for m in final_messages_for_llm):
-                    final_messages_for_llm.append(msg)
-            
-            # 添加非系统消息（通常是RAG上下文和用户问题）
-            non_system_last_msgs = [msg for msg in last_messages if not isinstance(msg, SystemMessage)]
-            final_messages_for_llm.extend(non_system_last_msgs)
-            
-            print(f"[Agent Node] RAG模式：使用 {len(final_messages_for_llm)} 条消息 ({len(system_msgs)} 系统 + {len(non_system_last_msgs)} 最新)")
-            
-            # 跳过后续的修剪和摘要逻辑
-            print(f"[Agent Node] Final messages passed to LLM: {len(final_messages_for_llm)} messages")
-            print(f"[Agent Node] Final messages detail:\n{final_messages_for_llm}")
-            
-            print(f"[Agent Node] Calling LLM with {len(final_messages_for_llm)} messages...")
-            try:
-                # 调用绑定了工具的 LLM
-                response = llm_with_tools.invoke(final_messages_for_llm)
-                print(f"[Agent Node] LLM Response received: type={type(response)}, content={str(response.content)[:100]}...")
-                # Agent 节点直接返回 LLM 的响应 (可能包含工具调用)
-                return {"messages": [response]}
-            except Exception as llm_error:
-                print(f"[Agent Node] Error during LLM invocation: {llm_error}")
-                import traceback
-                traceback.print_exc()
-                # 返回错误信息时，也应该是一个列表
-                response = AIMessage(content=f"抱歉，处理您的请求时发生错误。")
-                return {"messages": [response]}
-        
-        # 如果不是RAG模式或不需要跳过历史，继续原有逻辑
-        # --- 结束RAG模式检查 ---
 
         # 手动保留 SystemMessage
         system_messages = filter_messages(valid_messages, include_types=[SystemMessage])
@@ -564,16 +618,37 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
     messages_input = []
     if history:
         messages_input = history  # history should already be BaseMessage objects if passed from app.py
-
-    # Ensure user_input is added correctly
-    if isinstance(user_input, BaseMessage):
-        messages_input.append(user_input)
-    elif isinstance(user_input, str):
-        messages_input.append(HumanMessage(content=user_input))
+        print(f"[process_graph_stream] 使用传入的history，包含 {len(messages_input)} 条消息")
+        
+        # 检查history是否已经包含用户消息，避免重复添加
+        has_user_message = any(
+            isinstance(msg, HumanMessage) and 
+            (msg.content == user_input if isinstance(user_input, str) else True)
+            for msg in messages_input
+        )
+        
+        if not has_user_message:
+            print(f"[process_graph_stream] history中不包含当前用户消息，添加到messages_input")
+            # 只有当history中不包含用户消息时才添加
+            if isinstance(user_input, BaseMessage):
+                messages_input.append(user_input)
+            elif isinstance(user_input, str):
+                messages_input.append(HumanMessage(content=user_input))
+            else:
+                print(f"[process_graph_stream] Warning: Unexpected user_input type: {type(user_input)}. Converting to HumanMessage.")
+                messages_input.append(HumanMessage(content=str(user_input)))
+        else:
+            print(f"[process_graph_stream] history已包含当前用户消息，不重复添加")
     else:
-        # Handle potential error or unexpected type
-        print(f"[process_graph_stream] Warning: Unexpected user_input type: {type(user_input)}. Converting to HumanMessage.")
-        messages_input.append(HumanMessage(content=str(user_input)))
+        # 如果没有history，则只添加用户输入
+        print(f"[process_graph_stream] 没有传入history，只使用用户输入")
+        if isinstance(user_input, BaseMessage):
+            messages_input.append(user_input)
+        elif isinstance(user_input, str):
+            messages_input.append(HumanMessage(content=user_input))
+        else:
+            print(f"[process_graph_stream] Warning: Unexpected user_input type: {type(user_input)}. Converting to HumanMessage.")
+            messages_input.append(HumanMessage(content=str(user_input)))
 
     if config is None:
         default_thread_id = f"cli_session_{str(uuid.uuid4())}"
@@ -585,13 +660,15 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
 
     try:
         langgraph_config = RunnableConfig(configurable=config.get("configurable", {}))
-        
+        # 添加调试输出
+        print(f"[LANGGRAPH] Debug - langgraph_config: {langgraph_config}")
+
         # 跟踪已经生成的内容，用于检测新增内容
         last_content = ""
 
         # 使用stream模式流式获取LLM的输出
         for event in graph.stream(
-            {"messages": messages_input},  # Pass the combined list
+            {"messages": messages_input, "config": config},  # 尝试直接传入config
             config=langgraph_config,
             stream_mode="values"  # 使用values模式获取全部状态
         ):
@@ -618,32 +695,3 @@ def process_graph_stream(graph, user_input: str, history=None, config=None):
         traceback.print_exc()
         yield f"流式传输过程中发生错误: {str(e)}"  # Yield error message
 
-
-# 交互式命令行界面（保留原有功能）
-def start_cli():
-    """启动命令行界面"""
-    graph_builder = create_graph()
-    graph = graph_builder.compile() # 不带检查点编译
-
-    print("欢迎来到 LangGraph 聊天机器人 CLI！输入 'quit' 退出。")
-    config = {"configurable": {"thread_id": f"cli_chat_{uuid.uuid4()}"}} # 每次启动新的 CLI 会话
-
-    while True:
-        user_input = input("You: ")
-        if user_input.lower() == 'quit':
-            break
-        if not user_input.strip():
-            continue
-
-        print("AI: ", end="", flush=True)
-        full_response = ""
-        # CLI 每次都是新对话，传递空历史
-        for chunk in process_graph_stream(graph, user_input, history=[], config=config):
-            print(chunk, end="", flush=True)
-            full_response += chunk
-        print() # 换行
-
-
-# 如果直接运行此脚本，启动命令行界面
-if __name__ == "__main__":
-    start_cli()

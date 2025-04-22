@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 from langchain_community.vectorstores import Chroma, FAISS
-from langchain_community.embeddings import BaichuanTextEmbeddings
+from langchain_community.embeddings import JinaEmbeddings
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredMarkdownLoader, UnstructuredWordDocumentLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.vectorstores import VectorStoreRetriever
@@ -10,6 +10,9 @@ from langchain_core.documents import Document
 from typing import Optional
 import requests # 需要导入 requests 来检查异常类型
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception # 导入 tenacity
+
+from dotenv import load_dotenv
+load_dotenv()  # 加载.env文件中的环境变量
 # --- 配置常量 (可以考虑从 main.py 或 .env 导入) ---
 VECTORSTORE_BASE_PATH = "./db/vectorstores" # 与 main.py 保持一致
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2" # 与 main.py 保持一致
@@ -25,20 +28,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 def get_embedding_model():
-    """获取或初始化 Baichuan Embedding 模型"""
+    """获取或初始化Jina Embedding模型"""
     global _embedding_model
     if _embedding_model is None:
-        logger.info("[RAG Utils] Initializing Baichuan Embedding Model...")
+        logger.info("[RAG Utils] 初始化Jina Embedding模型...")
         try:
-            # 从环境变量获取 API Key
-            api_key = os.environ.get("BAICHUAN_API_KEY")
+            # 从环境变量获取API Key
+            api_key = os.environ.get("JINA_API_KEY")
             if not api_key:
-                raise ValueError("BAICHUAN_API_KEY environment variable not set.")
+                raise ValueError("JINA_API_KEY环境变量未设置")
 
-            _embedding_model = BaichuanTextEmbeddings(baichuan_api_key=api_key)
-            logger.info("[RAG Utils] Baichuan Embedding Model Initialized.")
+            _embedding_model = JinaEmbeddings(
+                jina_api_key=api_key,
+                model_name="jina-embeddings-v2-base-zh"  # 使用中文模型
+            )
+            logger.info("[RAG Utils] Jina Embedding模型初始化成功")
         except Exception as e:
-            logger.error(f"[RAG Utils] Failed to initialize Baichuan embedding model: {e}", exc_info=True)
+            logger.error(f"[RAG Utils] 初始化Jina embedding模型失败: {e}", exc_info=True)
             raise
     return _embedding_model
 
@@ -176,22 +182,59 @@ def get_retriever_for_thread(thread_id: str, search_kwargs: dict = {"k": 3}) -> 
         return None
 
 def load_document(file_path: str) -> list[Document]:
-    """根据文件扩展名加载文档"""
+    """根据文件扩展名加载文档，如无扩展名尝试检测文件类型"""
     logger.info(f"[RAG Utils] Loading document from: {file_path}")
     try:
-        if file_path.lower().endswith(".pdf"):
+        # 获取文件扩展名
+        file_extension = Path(file_path).suffix.lower()
+        
+        # 如果没有扩展名，尝试检测文件类型
+        if not file_extension:
+            # 尝试检测是否为PDF文件（检查文件头部）
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(4)
+                    if header == b'%PDF':
+                        logger.info(f"[RAG Utils] 检测到PDF文件: {file_path}")
+                        file_extension = '.pdf'
+                    else:
+                        # 如果不是PDF，假设为文本文件
+                        logger.info(f"[RAG Utils] 无法确定文件类型，尝试作为文本文件加载: {file_path}")
+                        file_extension = '.txt'
+            except Exception as e:
+                logger.error(f"[RAG Utils] 文件类型检测失败: {e}", exc_info=True)
+                return []
+        
+        # 根据扩展名加载文件
+        if file_extension == '.pdf':
             loader = PyPDFLoader(file_path)
-        elif file_path.lower().endswith(".txt"):
+            # 加载文档
+            documents = loader.load()
+            # 手动确保PDF页码元数据正确设置
+            for i, doc in enumerate(documents):
+                # 确保page字段存在且为正确类型
+                if 'page' not in doc.metadata or not isinstance(doc.metadata['page'], int):
+                    # 如果page_number存在，使用它
+                    if 'page_number' in doc.metadata:
+                        doc.metadata['page'] = doc.metadata['page_number']
+                    else:
+                        # 否则用索引+1作为页码（从1开始）
+                        doc.metadata['page'] = i + 1
+                logger.info(f"[RAG Utils] PDF页面 {i+1} 元数据: {doc.metadata}")
+        elif file_extension == '.txt':
             loader = TextLoader(file_path, encoding='utf-8') # 明确编码
-        elif file_path.lower().endswith(".md"):
+            documents = loader.load()
+        elif file_extension == '.md':
             loader = UnstructuredMarkdownLoader(file_path, mode="elements")
-        elif file_path.lower().endswith((".doc", ".docx")):
+            documents = loader.load()
+        elif file_extension == '.doc' or file_extension == '.docx':
              # 需要安装 python-docx 和 unstructured
             loader = UnstructuredWordDocumentLoader(file_path, mode="elements")
+            documents = loader.load()
         else:
             logger.warning(f"[RAG Utils] Unsupported file type: {file_path}. Returning empty list.")
             return []
-        documents = loader.load()
+            
         logger.info(f"[RAG Utils] Loaded {len(documents)} document pages/parts from {file_path}")
         return documents
     except Exception as e:
@@ -253,12 +296,12 @@ def index_document(file_path: str, thread_id: str):
         documents = load_document(file_path)
         if not documents:
             logger.warning(f"[RAG Indexing] No documents loaded from {file_path}. Skipping indexing.")
-            return True # 认为没有文档也是一种"成功"完成，避免 app.py 报错
+            return False # 改为返回False，表示没有实际创建索引
 
         chunks = split_documents(documents, chunk_size=500, chunk_overlap=50)
         if not chunks:
              logger.warning(f"[RAG Indexing] No chunks created from {file_path}. Skipping indexing.")
-             return True # 没有块也算完成
+             return False # 同样改为返回False
 
         embeddings = get_embedding_model()
         os.makedirs(index_dir, exist_ok=True)
@@ -292,12 +335,18 @@ def index_document(file_path: str, thread_id: str):
         logger.info(f"[RAG Indexing] Saving FAISS index for thread {thread_id} to {index_dir}")
         vectorstore.save_local(index_dir)
 
-        logger.info(f"[RAG Indexing] Indexing completed successfully for {file_path} (thread {thread_id}).")
-        return True
+        # 添加验证步骤，确保向量存储确实被创建
+        if os.path.exists(faiss_file_path) and os.path.exists(pkl_file_path):
+            logger.info(f"[RAG Indexing] 成功验证向量存储创建: {index_dir}")
+            logger.info(f"[RAG Indexing] Indexing completed successfully for {file_path} (thread {thread_id}).")
+            return True
+        else:
+            logger.error(f"[RAG Indexing] 向量存储文件未成功创建: {index_dir}")
+            return False
 
     except Exception as e:
         logger.error(f"[RAG Indexing] Error during indexing for {file_path} (thread {thread_id}): {e}", exc_info=True)
-        raise # 将异常重新抛出
+        return False # 发生异常，返回False而不是抛出异常，让调用方能更好地处理
 
 def search_index(query: str, thread_id: str, k: int = 5) -> list[Document]:
     """在指定线程的 FAISS 索引中搜索相关文档，并返回带有相关性分数的文档列表"""
@@ -358,3 +407,13 @@ if __name__ == '__main__':
 
     # 可以在这里添加更多的测试代码，例如索引一个示例文档和搜索
     # pass
+
+    # 测试Jina Embeddings
+    try:
+        print("测试Jina Embeddings...")
+        model = get_embedding_model()
+        test_text = "这是一个测试文本"
+        embedding = model.embed_query(test_text)
+        print(f"成功生成嵌入向量，维度: {len(embedding)}")
+    except Exception as e:
+        print(f"测试失败: {e}")

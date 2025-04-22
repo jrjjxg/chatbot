@@ -17,7 +17,8 @@ from rag_utils import (
     split_documents, 
     ALLOWED_EXTENSIONS
 )
-
+from dotenv import load_dotenv
+load_dotenv()  # 加载.env文件中的环境变量
 # 配置日志
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,8 @@ class KnowledgeBase:
             if file_extension not in ALLOWED_EXTENSIONS:
                 logger.error(f"不支持的文件类型: {file_extension}")
                 return False
+            
+            print(f"DEBUG: 文件路径: {file_path}, 检测到的扩展名: {file_extension}")
             
             # 使用原文件名或提供的名称
             if file_name is None:

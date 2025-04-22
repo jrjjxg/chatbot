@@ -20,21 +20,25 @@ from knowledge_base import (  # 导入知识库功能
     create_knowledge_base,
     delete_knowledge_base
 )
-from langchain.prompts import PromptTemplate, ChatPromptTemplate # 用于创建动态提示词
 import requests
 import datetime
 from pathlib import Path # 确保导入 Path
 import logging
 import asyncio
-
+from dotenv import load_dotenv
+load_dotenv()  # 加载.env文件中的环境变量
 # --- 在所有其他代码之前配置日志 --- 
 # ... (日志配置)
+
+
 
 # --- 文件上传配置 (定义常量) ---
 UPLOAD_FOLDER = 'temp_uploads'
 MAX_UPLOAD_MB = 50
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 VECTORSTORE_BASE_PATH = "./db/vectorstores" # 将定义移到前面
+
+
 
 # --- 定义 get_vectorstore_path_for_thread 函数 --- 
 def get_vectorstore_path_for_thread(thread_id: str) -> str:
@@ -224,6 +228,9 @@ app.runnable = graph_builder.compile(
 )
 print("LangGraph图编译成功。")
 
+
+
+
 @app.route('/api/chat/stream', methods=['GET', 'POST', 'OPTIONS'])
 def chat_stream_api():
     """为前端提供流式输出的API接口 (入口不变，但调用异步生成器)"""
@@ -246,7 +253,6 @@ def chat_stream_api():
     message = req_data.get('message')
     no_streaming = req_data.get('noStreaming', False)
     no_search = req_data.get('noSearch', False)  # 前端可以选择是否禁用搜索
-    
     # 新增：知识库ID参数
     kb_id = req_data.get('kb_id')
     
@@ -268,6 +274,8 @@ def chat_stream_api():
         print(f"警告: 用户 {request_user_id} 尝试访问可能不属于他的线程 {thread_id}")
         # 严格模式下直接拒绝
         # return jsonify({'error': '无权访问该线程'}), 403
+
+
 
     # --- 准备聊天处理 ---
     try:
@@ -310,6 +318,9 @@ def chat_stream_api():
         # 确定使用哪个系统提示词
         system_prompt = custom_system_prompt if custom_system_prompt else default_system_prompt
         print(f"最终决定使用的系统提示词: {system_prompt}")
+
+
+
 
         # ---- RAG检索和动态提示词逻辑 ----
         # 变量初始化
@@ -366,7 +377,9 @@ def chat_stream_api():
                     print(f"从知识库 {kb_id} 未找到相关内容")
             else:
                 print(f"知识库 {kb_id} 不存在")
-        
+
+
+
         # --- 原有线程向量库检索逻辑 ---
         elif need_rag:
             print(f"使用线程向量库进行RAG检索")
@@ -406,8 +419,19 @@ def chat_stream_api():
         else:
             print("基于规则或前端设置，跳过RAG检索")
 
+
+
         # --- 构建动态提示词 ---
         if has_rag_context:
+            # 调试: 输出检索文档的元数据，查看页码信息是否存在
+            print("\n==== RAG检索文档元数据详情 ====")
+            for i, doc in enumerate(retrieved_docs):
+                print(f"文档 #{i+1} 元数据:")
+                for key, value in doc.metadata.items():
+                    print(f"  {key}: {value}")
+                print(f"  页面内容前50字符: {doc.page_content[:50]}...")
+                print("----------")
+                
             # 构建文档内容上下文 (使用过滤后的 retrieved_docs)
             rag_context = "\n\n".join([
                 f"《{doc.metadata['source']}》(第{doc.metadata.get('page', 0)}页):\n{doc.page_content}\n\n" 
@@ -429,11 +453,18 @@ def chat_stream_api():
 
 原始系统提示: {system_prompt}
 """
-            # 使用RAG系统提示
-            messages = [SystemMessage(content=rag_system_prompt)]
+            # 打印RAG上下文预览
+            rag_context_preview = rag_context[:300] + "..." if len(rag_context) > 300 else rag_context
+            print(f"[Chat API] 创建RAG系统消息, RAG上下文预览: {rag_context_preview}")
             
-            # --- 修改点：直接添加用户问题，不再添加额外的AI消息 ---
+            # 使用RAG系统提示
+            messages = []  # 完全清空历史消息
+            # 只添加新的RAG系统消息和当前用户问题，不保留任何历史消息
+            messages.append(SystemMessage(content=rag_system_prompt))
+            # 直接添加当前用户查询作为最新消息，确保RAG只处理当前问题
             messages.append(HumanMessage(content=message))
+            
+            print(f"[Chat API] 创建了新的消息列表，包含 {len(messages)} 条消息")
             
             # --- 修改点3：设置标志，表示这是RAG增强的消息序列 ---
             config = {
@@ -1047,8 +1078,10 @@ def upload_kb_document_api(kb_id):
         try:
             os.remove(temp_file_path)
         except Exception as e:
-            
-         if success:
+            print(f"删除临时文件失败: {e}")  # 只记录警告，继续处理
+
+        # 确保正确缩进
+        if success:
             return jsonify({"message": f"文件 '{filename}' 上传到知识库成功"})
         else:
             return jsonify({"error": "文件上传到知识库失败"}), 500

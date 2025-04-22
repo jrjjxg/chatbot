@@ -1,0 +1,35 @@
+{
+  "id": "kb_9bf6b189",
+  "name": "kb",
+  "description": "",
+  "created_at": "2025-04-21T12:04:13.073422",
+  "updated_at": "2025-04-22T18:03:12.834270",
+  "created_by": "testuser",
+  "document_count": 3,
+  "documents": [
+    {
+      "id": "1bde07b2-a510-4a0a-9350-4a3aeea9c625",
+      "name": "renzhiqingxu.pdf",
+      "path": "docs\\renzhiqingxu.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-21T12:04:21.526186",
+      "size": 307066
+    },
+    {
+      "id": "3790b2b2-53f9-46d2-b6b1-364d48fd2204",
+      "name": "zishayufang.pdf",
+      "path": "docs\\zishayufang.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-21T12:09:48.148783",
+      "size": 422990
+    },
+    {
+      "id": "f047c233-ce7c-4065-b57d-18bd85290159",
+      "name": "Depression_evidence_Chinese.pdf",
+      "path": "docs\\Depression_evidence_Chinese.pdf",
+      "type": "pdf",
+      "added_at": "2025-04-22T18:03:12.833273",
+      "size": 560335
+    }
+  ]
+}
